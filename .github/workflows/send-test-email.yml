@@ -78,6 +78,77 @@ jobs:
           print("Configuração válida para um único envio de teste.")
           PY
 
+      - name: Diagnosticar conexão SMTP
+        run: |
+          python - <<'PY'
+          import os
+          import smtplib
+          import socket
+          import ssl
+
+          host = os.environ["SMTP_HOST"]
+          port = int(os.environ["SMTP_PORT"])
+          username = os.environ["SMTP_USERNAME"]
+          password = os.environ["SMTP_PASSWORD"]
+
+          print("=== Configuração sanitizada ===")
+          print(f"Servidor: {host}:{port}")
+          print(f"STARTTLS: {os.environ['SMTP_STARTTLS']}")
+          print(f"Usuário preenchido: {bool(username)}")
+          print(f"Formato do usuário Brevo: {username.endswith('@smtp-brevo.com')}")
+          print(f"Tamanho do usuário: {len(username)}")
+          print(f"Senha preenchida: {bool(password)}")
+          print(f"Tamanho da senha: {len(password)}")
+          print(f"Senha contém espaços nas extremidades: {password != password.strip()}")
+
+          try:
+              addresses = sorted(
+                  {
+                      item[4][0]
+                      for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+                  }
+              )
+              print(f"DNS resolvido: {', '.join(addresses)}")
+          except OSError as exc:
+              raise RuntimeError(f"Falha ao resolver o DNS de {host}: {exc}") from None
+
+          try:
+              with smtplib.SMTP(host, port, timeout=30) as smtp:
+                  print(f"Conexão TCP estabelecida com: {smtp.sock.getpeername()}")
+
+                  code, response = smtp.ehlo()
+                  print(f"EHLO antes do TLS: código {code}")
+                  print(f"Extensões anunciadas: {', '.join(sorted(smtp.esmtp_features))}")
+                  if code != 250:
+                      raise RuntimeError(f"Servidor rejeitou EHLO com código {code}")
+                  if not smtp.has_extn("starttls"):
+                      raise RuntimeError("Servidor não anunciou suporte a STARTTLS")
+
+                  smtp.starttls(context=ssl.create_default_context())
+                  print(f"STARTTLS estabelecido: {smtp.sock.version()}, cifra {smtp.sock.cipher()[0]}")
+
+                  code, response = smtp.ehlo()
+                  print(f"EHLO depois do TLS: código {code}")
+                  print(f"Métodos de autenticação: {smtp.esmtp_features.get('auth', 'não informado')}")
+
+                  print("Tentando autenticar com as credenciais configuradas...")
+                  smtp.login(username, password)
+                  print("Autenticação SMTP concluída com sucesso.")
+          except smtplib.SMTPAuthenticationError as exc:
+              detail = exc.smtp_error.decode(errors="replace")
+              print("::error title=Autenticação SMTP rejeitada::"
+                    f"A Brevo respondeu {exc.smtp_code}: {detail}")
+              print("Verifique se a chave SMTP está ativa, se não é uma API key e se a "
+                    "plataforma Transactional está habilitada.")
+              raise RuntimeError(
+                  f"Autenticação rejeitada pela Brevo ({exc.smtp_code}: {detail})"
+              ) from None
+          except (smtplib.SMTPException, OSError) as exc:
+              raise RuntimeError(
+                  f"Falha durante {exc.__class__.__name__}: {exc}"
+              ) from None
+          PY
+
       - name: Enviar um e-mail
         run: |
           python - <<'PY'
