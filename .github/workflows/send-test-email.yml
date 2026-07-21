@@ -1,0 +1,111 @@
+name: Enviar e-mail de teste
+
+on:
+  workflow_dispatch:
+    inputs:
+      subject:
+        description: Assunto do e-mail
+        required: true
+        type: string
+        default: Teste do Tironi Outreach
+      message:
+        description: Mensagem do e-mail
+        required: true
+        type: string
+        default: |
+          Olá,
+
+          Este é um envio de teste do Tironi Outreach pelo GitHub Actions.
+
+          Se você recebeu esta mensagem, a configuração SMTP está funcionando.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tironi-outreach-test-email
+  cancel-in-progress: false
+
+jobs:
+  send:
+    name: Enviar para chatbobo22@gmail.com
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TEST_RECIPIENT: chatbobo22@gmail.com
+      TEST_SUBJECT: ${{ inputs.subject }}
+      TEST_MESSAGE: ${{ inputs.message }}
+      DRY_RUN: "false"
+      SMTP_HOST: smtp-relay.brevo.com
+      SMTP_PORT: "587"
+      SMTP_STARTTLS: "true"
+      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      OUTREACH_FROM_EMAIL: ${{ secrets.OUTREACH_FROM_EMAIL }}
+      OUTREACH_FROM_NAME: ${{ secrets.OUTREACH_FROM_NAME || 'Tironi Tech' }}
+      OUTREACH_REPLY_TO: ${{ secrets.OUTREACH_REPLY_TO }}
+      UNSUBSCRIBE_SECRET: ${{ secrets.UNSUBSCRIBE_SECRET }}
+      PUBLIC_BASE_URL: ${{ vars.PUBLIC_BASE_URL || 'https://tironi-outreach.vercel.app' }}
+
+    steps:
+      - name: Baixar o projeto
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar o projeto
+        run: python -m pip install .
+
+      - name: Validar destinatário e configuração
+        run: |
+          python - <<'PY'
+          import os
+
+          from outreach.config import Settings
+
+          recipient = os.environ["TEST_RECIPIENT"]
+          if recipient != "chatbobo22@gmail.com":
+              raise RuntimeError("O destinatário de teste não pode ser alterado")
+
+          settings = Settings()
+          if settings.dry_run:
+              raise RuntimeError("DRY_RUN precisa estar desativado para o teste real")
+          settings.validate_smtp()
+          print("Configuração válida para um único envio de teste.")
+          PY
+
+      - name: Enviar um e-mail
+        run: |
+          python - <<'PY'
+          import os
+
+          from outreach.config import Settings
+          from outreach.providers.base import OutboundEmail
+          from outreach.providers.brevo_smtp import BrevoSmtpProvider
+
+          recipient = os.environ["TEST_RECIPIENT"]
+          settings = Settings()
+          result = BrevoSmtpProvider(settings).send(
+              OutboundEmail(
+                  message_id=0,
+                  to=recipient,
+                  subject=os.environ["TEST_SUBJECT"],
+                  text=os.environ["TEST_MESSAGE"],
+                  unsubscribe_url=f"{settings.public_base_url}/unsubscribe/test",
+              )
+          )
+
+          if not result.accepted:
+              raise RuntimeError(f"Falha no envio SMTP: {result.error}")
+
+          print(f"E-mail aceito pelo SMTP para {recipient}.")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## E-mail de teste aceito pelo SMTP\n")
+              summary.write(f"- Destinatário: `{recipient}`\n")
+              summary.write(f"- Assunto: {os.environ['TEST_SUBJECT']}\n")
+              summary.write("- Resultado: aceito pelo relay SMTP\n")
+          PY
