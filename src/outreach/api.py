@@ -25,6 +25,10 @@ class CampaignIn(BaseModel):
     body_template: str = Field(min_length=10, max_length=10000)
 
 
+class DeliveryResolutionIn(BaseModel):
+    delivered: bool
+
+
 @app.on_event("startup")
 def startup():
     db.migrate(Path(__file__).resolve().parents[2] / "sql")
@@ -85,6 +89,79 @@ def dashboard():
                 "SELECT * FROM outreach.v_dashboard ORDER BY campaign_id DESC"
             ).fetchall()
         }
+
+
+@app.post("/api/messages/{message_id}/reply", dependencies=[Depends(auth)])
+def mark_reply(message_id: int):
+    with db.connect() as conn:
+        message = conn.execute(
+            "SELECT lead_id FROM outreach.messages WHERE id=%s",
+            (message_id,),
+        ).fetchone()
+        if not message:
+            raise HTTPException(404, "Mensagem não encontrada")
+        conn.execute(
+            """
+            UPDATE outreach.messages
+            SET status='replied',replied_at=now(),updated_at=now()
+            WHERE id=%s
+            """,
+            (message_id,),
+        )
+        conn.execute(
+            """
+            UPDATE outreach.leads
+            SET status='replied',updated_at=now()
+            WHERE id=%s
+            """,
+            (message["lead_id"],),
+        )
+        conn.commit()
+    return {"replied": True}
+
+
+@app.post("/api/messages/{message_id}/resolve-delivery", dependencies=[Depends(auth)])
+def resolve_delivery(message_id: int, data: DeliveryResolutionIn):
+    with db.connect() as conn:
+        message = conn.execute(
+            """
+            SELECT lead_id,status FROM outreach.messages WHERE id=%s
+            """,
+            (message_id,),
+        ).fetchone()
+        if not message:
+            raise HTTPException(404, "Mensagem não encontrada")
+        if message["status"] != "delivery_uncertain":
+            raise HTTPException(409, "Mensagem não está com entrega incerta")
+        if data.delivered:
+            conn.execute(
+                """
+                UPDATE outreach.messages
+                SET status='sent',sent_at=coalesce(sent_at,now()),updated_at=now()
+                WHERE id=%s
+                """,
+                (message_id,),
+            )
+            conn.execute(
+                """
+                UPDATE outreach.leads
+                SET status='contacted',updated_at=now()
+                WHERE id=%s AND status='ready'
+                """,
+                (message["lead_id"],),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE outreach.messages
+                SET status='failed',last_error='Entrega descartada manualmente',
+                    updated_at=now()
+                WHERE id=%s
+                """,
+                (message_id,),
+            )
+        conn.commit()
+    return {"resolved": True, "delivered": data.delivered}
 
 
 @app.api_route(

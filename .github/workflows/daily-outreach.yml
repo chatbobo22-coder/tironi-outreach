@@ -1,0 +1,135 @@
+name: Envio diário da campanha
+
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Limite desta execução manual
+        required: true
+        type: string
+        default: "1"
+      dry_run:
+        description: Apenas preparar e visualizar, sem enviar
+        required: true
+        type: boolean
+        default: true
+      interval_seconds:
+        description: Intervalo entre envios reais
+        required: true
+        type: string
+        default: "30"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tironi-outreach-daily
+  cancel-in-progress: false
+
+jobs:
+  send:
+    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_DAILY_OUTREACH == 'true'
+    name: Processar campanha diária
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
+      RUN_LIMIT: ${{ github.event_name == 'schedule' && '300' || inputs.limit }}
+      SEND_INTERVAL_SECONDS: ${{ github.event_name == 'schedule' && '30' || inputs.interval_seconds }}
+      REQUIRE_MANUAL_APPROVAL: "false"
+      DAILY_EMAIL_LIMIT: "300"
+      HOURLY_EMAIL_LIMIT: "300"
+      MAX_PER_DOMAIN_PER_DAY: "2"
+      MAX_FOLLOW_UPS: "1"
+      FOLLOW_UP_DELAY_DAYS: "7"
+      SEND_START_HOUR: "8"
+      SEND_END_HOUR: "18"
+      APP_TIMEZONE: America/Sao_Paulo
+      SMTP_HOST: smtp-relay.brevo.com
+      SMTP_PORT: "587"
+      SMTP_STARTTLS: "true"
+      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      OUTREACH_FROM_EMAIL: ${{ secrets.OUTREACH_FROM_EMAIL }}
+      OUTREACH_FROM_NAME: ${{ secrets.OUTREACH_FROM_NAME || 'Tironi Tech' }}
+      OUTREACH_REPLY_TO: ${{ secrets.OUTREACH_REPLY_TO }}
+      UNSUBSCRIBE_SECRET: ${{ secrets.UNSUBSCRIBE_SECRET }}
+      PUBLIC_BASE_URL: ${{ vars.PUBLIC_BASE_URL || 'https://tironi-outreach.vercel.app' }}
+
+    steps:
+      - name: Baixar o projeto
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar o projeto
+        run: python -m pip install .
+
+      - name: Validar configuração
+        run: |
+          python - <<'PY'
+          import os
+
+          required = [
+              "DATABASE_URL",
+              "SMTP_USERNAME",
+              "SMTP_PASSWORD",
+              "OUTREACH_FROM_EMAIL",
+              "UNSUBSCRIBE_SECRET",
+          ]
+          missing = [name for name in required if not os.getenv(name)]
+          if missing:
+              raise RuntimeError("Secrets ausentes: " + ", ".join(missing))
+
+          print(f"Modo seguro sem envio: {os.environ['DRY_RUN']}")
+          print(f"Limite desta execução: {os.environ['RUN_LIMIT']}")
+          print(f"Intervalo entre envios: {os.environ['SEND_INTERVAL_SECONDS']} segundos")
+          PY
+
+      - name: Sincronizar, preparar e processar
+        run: |
+          set -o pipefail
+          outreach run-daily \
+            --limit "$RUN_LIMIT" \
+            --interval "$SEND_INTERVAL_SECONDS" | tee daily-result.json
+
+      - name: Publicar resumo
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result_path = Path("daily-result.json")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Campanha diária Tironi Tech\n")
+              if not result_path.exists():
+                  summary.write("A execução terminou antes de gerar o resultado.\n")
+              else:
+                  data = json.loads(result_path.read_text(encoding="utf-8"))
+                  labels = {
+                      "dry_run": "Modo seguro",
+                      "synced": "Leads sincronizados",
+                      "prepared_initial": "Envios iniciais preparados",
+                      "prepared_followups": "Follow-ups preparados",
+                      "recovered_stale": "Envios incertos recuperados",
+                      "delivery_uncertain": "Entregas que exigem reconciliação",
+                      "processed": "Processados",
+                      "sent": "Aceitos pelo SMTP",
+                      "failed": "Falhas",
+                      "queued": "Ainda na fila",
+                      "remaining_daily": "Saldo diário",
+                      "would_send": "Seriam enviados",
+                  }
+                  for key, label in labels.items():
+                      if key in data:
+                          summary.write(f"- {label}: `{data[key]}`\n")
+          PY

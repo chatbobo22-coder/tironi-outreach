@@ -78,6 +78,38 @@ DRY_RUN=false
 
 O worker envia apenas no horário configurado e respeita todos os limites.
 
+## Envio diário pelo GitHub Actions
+
+O workflow `Envio diário da campanha` conecta ao PostgreSQL definido em
+`DATABASE_URL`, sincroniza a base, prepara a campanha e processa até 300 mensagens.
+Ele roda diariamente às 09:00 no horário de São Paulo.
+
+Antes de habilitar o envio real:
+
+1. Configure os secrets `DATABASE_URL`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
+   `OUTREACH_FROM_EMAIL`, `OUTREACH_REPLY_TO` e `UNSUBSCRIBE_SECRET`.
+2. Configure a variável `PUBLIC_BASE_URL` com a URL HTTPS da API.
+3. Execute manualmente com `dry_run=true` e limite `1`.
+4. Revise o resumo da execução antes de usar `dry_run=false`.
+5. Depois da validação, configure `ENABLE_DAILY_OUTREACH=true` nas variables do
+   GitHub Actions para liberar o agendamento.
+
+Cada lead recebe no máximo um envio inicial e um follow-up após sete dias. Leads
+marcados como `replied` ou presentes em `outreach.suppressions` não recebem o
+follow-up. A lista não reinicia depois disso; apenas novos leads entram na campanha.
+Enquanto não houver integração com a caixa de entrada, registre uma resposta com
+`POST /api/messages/{id}/reply` e o cabeçalho `X-API-Key`.
+
+Se uma execução for interrompida durante o SMTP, a mensagem fica como
+`delivery_uncertain` e novos lotes são bloqueados para evitar duplicidade. Consulte
+o log da Brevo e resolva com `POST /api/messages/{id}/resolve-delivery`, enviando
+`{"delivered": true}` ou `{"delivered": false}`.
+
+Os runners hospedados pelo GitHub usam IPs de saída dinâmicos. O PostgreSQL precisa
+aceitar essas conexões e o bloqueio por IP das chaves SMTP na Brevo precisa ser
+compatível com esse modelo. Para restringir por um único IP, use um runner próprio
+com saída fixa.
+
 ## Outros canais
 
 WhatsApp, Instagram, Facebook e LinkedIn não estão ativos nesta versão. Eles serão adicionados por adapters próprios. Não use automação de navegador nem endpoints não oficiais. Instagram/Facebook devem respeitar as janelas e permissões da Meta; LinkedIn deve começar como tarefa manual.

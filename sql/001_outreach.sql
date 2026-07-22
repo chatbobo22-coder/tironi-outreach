@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS outreach.messages (
   subject text,
   body_text text NOT NULL,
   status text NOT NULL DEFAULT 'pending_approval' CHECK (status IN
-    ('draft','pending_approval','approved','queued','sending','sent','delivered','failed','bounced','replied','unsubscribed','blocked','canceled')),
+    ('draft','pending_approval','approved','queued','sending','sent','delivered','failed',
+     'delivery_uncertain','bounced','replied','unsubscribed','blocked','canceled')),
   attempt_count integer NOT NULL DEFAULT 0,
   provider text,
   provider_message_id text,

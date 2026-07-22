@@ -33,6 +33,9 @@ class Settings:
     send_end_hour: int = int(os.getenv("SEND_END_HOUR", "17"))
     timezone: str = os.getenv("APP_TIMEZONE", "America/Sao_Paulo")
     poll_seconds: int = int(os.getenv("WORKER_POLL_SECONDS", "15"))
+    max_followups: int = int(os.getenv("MAX_FOLLOW_UPS", "1"))
+    followup_delay_days: int = int(os.getenv("FOLLOW_UP_DELAY_DAYS", "7"))
+    send_interval_seconds: int = int(os.getenv("SEND_INTERVAL_SECONDS", "30"))
     dry_run: bool = flag("DRY_RUN", "true")
 
     def validate_smtp(self) -> None:

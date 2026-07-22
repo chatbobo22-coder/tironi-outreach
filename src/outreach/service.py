@@ -35,7 +35,7 @@ def render(template: str, lead: dict) -> str:
     return template.format_map(values)
 
 
-def sync_leads(conn) -> int:
+def sync_leads(conn, *, commit: bool = True) -> int:
     relations = conn.execute(
         "SELECT to_regclass('cnpj.v_prospectos_outreach_v2') AS v2, "
         "to_regclass('cnpj.v_prospectos_outreach') AS v1"
@@ -89,11 +89,75 @@ def sync_leads(conn) -> int:
             ),
         )
         count += result.rowcount
-    conn.commit()
+    if commit:
+        conn.commit()
     return count
 
 
-def prepare_campaign(conn, campaign_id: int, settings: Settings) -> int:
+def ensure_campaign(
+    conn,
+    campaign_key: str,
+    name: str,
+    subject_template: str,
+    body_template: str,
+    daily_limit: int,
+    *,
+    commit: bool = True,
+):
+    campaign = conn.execute(
+        "SELECT * FROM outreach.campaigns WHERE campaign_key=%s",
+        (campaign_key,),
+    ).fetchone()
+    if not campaign:
+        campaign = conn.execute(
+            """
+            SELECT * FROM outreach.campaigns
+            WHERE name=%s AND campaign_key IS NULL
+            ORDER BY id LIMIT 1
+            """,
+            (name,),
+        ).fetchone()
+    if campaign:
+        campaign = conn.execute(
+            """
+            UPDATE outreach.campaigns
+            SET campaign_key=%s,name=%s,subject_template=%s,body_template=%s,status='active',
+                requires_approval=false,daily_limit=%s,updated_at=now()
+            WHERE id=%s
+            RETURNING *
+            """,
+            (
+                campaign_key,
+                name,
+                subject_template,
+                body_template,
+                daily_limit,
+                campaign["id"],
+            ),
+        ).fetchone()
+    else:
+        campaign = conn.execute(
+            """
+            INSERT INTO outreach.campaigns
+              (campaign_key,name,subject_template,body_template,status,
+               requires_approval,daily_limit)
+            VALUES (%s,%s,%s,%s,'active',false,%s)
+            RETURNING *
+            """,
+            (campaign_key, name, subject_template, body_template, daily_limit),
+        ).fetchone()
+    if commit:
+        conn.commit()
+    return campaign
+
+
+def prepare_campaign(
+    conn,
+    campaign_id: int,
+    settings: Settings,
+    *,
+    commit: bool = True,
+) -> int:
     campaign = conn.execute(
         "SELECT * FROM outreach.campaigns WHERE id=%s", (campaign_id,)
     ).fetchone()
@@ -114,12 +178,13 @@ def prepare_campaign(conn, campaign_id: int, settings: Settings) -> int:
     initial_status = "pending_approval" if settings.require_approval else "queued"
     count = 0
     for lead in rows:
-        conn.execute(
+        result = conn.execute(
             """
             INSERT INTO outreach.messages
-              (campaign_id,lead_id,channel,destination,destination_domain,subject,body_text,status,scheduled_at)
-            VALUES (%s,%s,'email',%s,%s,%s,%s,%s,now())
-            ON CONFLICT (campaign_id,lead_id,channel) DO NOTHING
+              (campaign_id,lead_id,channel,destination,destination_domain,subject,
+               body_text,status,scheduled_at,sequence_step)
+            VALUES (%s,%s,'email',%s,%s,%s,%s,%s,now(),0)
+            ON CONFLICT (campaign_id,lead_id,channel,sequence_step) DO NOTHING
             """,
             (
                 campaign_id,
@@ -131,8 +196,69 @@ def prepare_campaign(conn, campaign_id: int, settings: Settings) -> int:
                 initial_status,
             ),
         )
-        count += 1
-    conn.commit()
+        count += result.rowcount
+    if commit:
+        conn.commit()
+    return count
+
+
+def prepare_followups(
+    conn,
+    campaign_id: int,
+    subject_template: str,
+    body_template: str,
+    delay_days: int,
+    *,
+    commit: bool = True,
+) -> int:
+    rows = conn.execute(
+        """
+        SELECT l.* FROM outreach.leads l
+        JOIN outreach.messages initial
+          ON initial.lead_id=l.id
+         AND initial.campaign_id=%s
+         AND initial.channel='email'
+         AND initial.sequence_step=0
+        WHERE l.status='contacted'
+          AND initial.status IN ('sent','delivered')
+          AND initial.sent_at <= now() - make_interval(days => %s)
+          AND NOT EXISTS (
+            SELECT 1 FROM outreach.messages followup
+            WHERE followup.campaign_id=initial.campaign_id
+              AND followup.lead_id=initial.lead_id
+              AND followup.channel=initial.channel
+              AND followup.sequence_step=1
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM outreach.suppressions s
+            WHERE s.channel='email' AND lower(s.destination)=lower(l.email)
+          )
+        ORDER BY initial.sent_at, l.id
+        """,
+        (campaign_id, delay_days),
+    ).fetchall()
+    count = 0
+    for lead in rows:
+        result = conn.execute(
+            """
+            INSERT INTO outreach.messages
+              (campaign_id,lead_id,channel,destination,destination_domain,subject,
+               body_text,status,scheduled_at,sequence_step)
+            VALUES (%s,%s,'email',%s,%s,%s,%s,'queued',now(),1)
+            ON CONFLICT (campaign_id,lead_id,channel,sequence_step) DO NOTHING
+            """,
+            (
+                campaign_id,
+                lead["id"],
+                lead["email"],
+                lead["email_domain"],
+                render(subject_template, lead),
+                render(body_template, lead),
+            ),
+        )
+        count += result.rowcount
+    if commit:
+        conn.commit()
     return count
 
 
