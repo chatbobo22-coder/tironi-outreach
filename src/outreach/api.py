@@ -208,6 +208,121 @@ def dashboard():
         }
 
 
+@app.get("/api/contacts", dependencies=[Depends(auth)])
+def contacts():
+    with db.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+              l.id,
+              coalesce(nullif(l.trade_name, ''), l.company_name) AS company,
+              l.company_name,
+              l.email,
+              coalesce(l.lead_score, 0) AS score,
+              l.status,
+              latest.subject AS last_subject,
+              coalesce((
+                SELECT count(*)
+                FROM outreach.events e
+                WHERE e.message_id=latest.id
+                  AND e.event_type IN ('open','opened')
+              ), 0) AS opens
+            FROM outreach.leads l
+            LEFT JOIN LATERAL (
+              SELECT m.id, m.subject
+              FROM outreach.messages m
+              WHERE m.lead_id=l.id
+              ORDER BY m.created_at DESC, m.id DESC
+              LIMIT 1
+            ) latest ON true
+            WHERE l.email IS NOT NULL
+            ORDER BY l.lead_score DESC NULLS LAST, l.id DESC
+            LIMIT 500
+            """
+        ).fetchall()
+    return {"contacts": rows}
+
+
+@app.get("/api/queue", dependencies=[Depends(auth)])
+def queue_status():
+    with db.connect() as conn:
+        metrics = conn.execute(
+            """
+            SELECT
+              count(*) FILTER (
+                WHERE status IN ('pending_approval','approved','queued','sending')
+              ) AS queued,
+              count(*) FILTER (WHERE sent_at >= current_date) AS processed_today,
+              count(*) FILTER (
+                WHERE sent_at >= current_date
+                  AND status IN ('sent','delivered','replied','unsubscribed')
+              ) AS accepted_today,
+              count(*) FILTER (
+                WHERE updated_at >= current_date AND status IN ('failed','bounced')
+              ) AS failed_today
+            FROM outreach.messages
+            """
+        ).fetchone()
+        items = conn.execute(
+            """
+            SELECT
+              m.id,
+              coalesce(nullif(l.trade_name, ''), l.company_name) AS company,
+              c.name AS campaign,
+              m.destination,
+              m.subject,
+              m.scheduled_at,
+              m.status,
+              m.updated_at
+            FROM outreach.messages m
+            JOIN outreach.leads l ON l.id=m.lead_id
+            JOIN outreach.campaigns c ON c.id=m.campaign_id
+            WHERE m.status IN ('pending_approval','approved','queued','sending')
+            ORDER BY m.scheduled_at NULLS LAST, m.id
+            LIMIT 100
+            """
+        ).fetchall()
+        recent = conn.execute(
+            """
+            SELECT m.id, m.destination, m.status, m.last_error, m.updated_at
+            FROM outreach.messages m
+            ORDER BY m.updated_at DESC, m.id DESC
+            LIMIT 20
+            """
+        ).fetchall()
+    logs = [
+        {
+            "id": row["id"],
+            "time": row["updated_at"].isoformat(),
+            "level": "error" if row["status"] in {"failed", "bounced"} else "success",
+            "message": row["last_error"] or f"Mensagem {row['status']} para {row['destination']}",
+        }
+        for row in recent
+    ]
+    return {"metrics": metrics, "items": items, "logs": logs}
+
+
+@app.get("/api/settings", dependencies=[Depends(auth)])
+def operational_settings():
+    return {
+        "settings": {
+            "provider": settings.email_provider,
+            "from_name": settings.from_name,
+            "from_email": settings.from_email,
+            "reply_to": settings.reply_to,
+            "require_approval": settings.require_approval,
+            "daily_limit": settings.daily_limit,
+            "hourly_limit": settings.hourly_limit,
+            "domain_daily_limit": settings.domain_daily_limit,
+            "send_interval_seconds": settings.send_interval_seconds,
+            "send_start_hour": settings.send_start_hour,
+            "send_end_hour": settings.send_end_hour,
+            "timezone": settings.timezone,
+            "dry_run": settings.dry_run,
+        }
+    }
+
+
 @app.post("/api/webhooks/sendpulse")
 def sendpulse_webhook(events: list[dict], secret: str | None = None):
     if settings.sendpulse_webhook_secret and secret != settings.sendpulse_webhook_secret:

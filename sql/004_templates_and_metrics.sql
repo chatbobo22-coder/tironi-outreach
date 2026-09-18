@@ -19,26 +19,30 @@ CREATE INDEX IF NOT EXISTS idx_templates_updated_at
 CREATE INDEX IF NOT EXISTS idx_campaigns_template_id
   ON outreach.campaigns (template_id);
 
-CREATE OR REPLACE VIEW outreach.v_dashboard AS
+-- A view pode existir com ordens de colunas diferentes dependendo da versão
+-- aplicada anteriormente. Recriá-la é seguro: os dados ficam nas tabelas.
+DROP VIEW IF EXISTS outreach.v_dashboard;
+
+CREATE VIEW outreach.v_dashboard AS
 SELECT
   c.id AS campaign_id,
   c.name,
   c.channel,
   c.status AS campaign_status,
+  count(m.id) AS messages_total,
+  count(*) FILTER (WHERE m.status = 'pending_approval') AS pending_approval,
+  count(*) FILTER (WHERE m.status IN ('approved','queued')) AS queued,
+  count(*) FILTER (WHERE m.status IN ('sent','delivered')) AS sent,
+  count(*) FILTER (WHERE m.status = 'bounced') AS bounced,
+  count(*) FILTER (WHERE m.status = 'replied') AS replied,
+  count(*) FILTER (WHERE m.status = 'unsubscribed') AS unsubscribed,
   c.template_id,
   t.name AS template_name,
   c.subject_template,
   c.daily_limit,
   c.created_at,
   c.updated_at,
-  count(m.id) AS messages_total,
-  count(*) FILTER (WHERE m.status = 'pending_approval') AS pending_approval,
-  count(*) FILTER (WHERE m.status IN ('approved','queued')) AS queued,
-  count(*) FILTER (WHERE m.status IN ('sent','delivered')) AS sent,
   count(*) FILTER (WHERE m.status = 'delivered') AS delivered,
-  count(*) FILTER (WHERE m.status = 'bounced') AS bounced,
-  count(*) FILTER (WHERE m.status = 'replied') AS replied,
-  count(*) FILTER (WHERE m.status = 'unsubscribed') AS unsubscribed,
   count(*) FILTER (
     WHERE EXISTS (
       SELECT 1 FROM outreach.events e
