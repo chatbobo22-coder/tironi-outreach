@@ -1,8 +1,8 @@
-from pathlib import Path
 import json
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import PlainTextResponse
+import psycopg
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .config import Settings
@@ -41,14 +41,24 @@ class DeliveryResolutionIn(BaseModel):
     delivered: bool
 
 
-@app.on_event("startup")
-def startup():
-    db.migrate(Path(__file__).resolve().parents[2] / "sql")
+@app.exception_handler(psycopg.Error)
+def database_error(_request: Request, _exc: psycopg.Error):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Banco de dados indisponível"},
+    )
 
 
 @app.get("/health")
 def health():
     return {"status": "ok", "dry_run": settings.dry_run}
+
+
+@app.get("/health/database", dependencies=[Depends(auth)])
+def database_health():
+    with db.connect() as conn:
+        conn.execute("SELECT 1")
+    return {"status": "ok"}
 
 
 @app.post("/api/leads/sync", dependencies=[Depends(auth)])

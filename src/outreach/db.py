@@ -8,7 +8,7 @@ class Database:
         self.url = url
 
     def connect(self):
-        return psycopg.connect(self.url, row_factory=dict_row)
+        return psycopg.connect(self.url, row_factory=dict_row, connect_timeout=10)
 
     def migrate(self, sql_dir: Path):
         with self.connect() as conn:
