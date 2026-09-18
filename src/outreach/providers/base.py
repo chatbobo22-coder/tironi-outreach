@@ -9,6 +9,7 @@ class OutboundEmail:
     subject: str
     text: str
     unsubscribe_url: str
+    html: str | None = None
 
 
 @dataclass(frozen=True)

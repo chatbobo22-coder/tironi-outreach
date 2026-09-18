@@ -1,7 +1,7 @@
 [project]
 name = "tironi-outreach"
 version = "1.0.0"
-description = "Orquestrador seguro de prospecção B2B com Brevo SMTP"
+description = "Orquestrador seguro de prospecção B2B com SendPulse SMTP"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.116,<1",

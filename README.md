@@ -1,12 +1,12 @@
 # Tironi Outreach
 
-Disparador B2B em Python, inicialmente configurado para e-mail via Brevo SMTP. Integra-se ao mesmo PostgreSQL do CNPJ ETL, mas grava somente no schema `outreach`.
+Disparador B2B em Python, configurado para e-mail via SendPulse SMTP. Integra-se ao mesmo PostgreSQL do CNPJ ETL, mas grava somente no schema `outreach`.
 
 ## Segurança antes de começar
 
-A chave SMTP nunca deve ser versionada. Gere uma nova credencial na Brevo, configure-a somente no `.env`/secret do servidor e mantenha `DRY_RUN=true` até validar remetente, DNS e campanha. A senha não está incluída neste projeto.
+A senha SMTP nunca deve ser versionada. Copie as credenciais em **Configurações SMTP > Geral** da SendPulse, configure-as somente no `.env`/secret do servidor e mantenha `DRY_RUN=true` até validar remetente, DNS e campanha. A senha não está incluída neste projeto.
 
-O remetente deve estar validado na Brevo. Configure SPF, DKIM e DMARC no domínio.
+O perfil SMTP precisa estar aprovado e o remetente validado na SendPulse. Configure SPF, DKIM, DMARC e, se usar rastreamento, o CNAME próprio no domínio.
 
 ## Recursos
 
@@ -15,7 +15,9 @@ O remetente deve estar validado na Brevo. Configure SPF, DKIM e DMARC no domíni
 - Aprovação obrigatória por padrão.
 - Fila PostgreSQL concorrente com `SKIP LOCKED`.
 - Limites diário, por hora e por domínio.
-- SMTP Brevo com STARTTLS.
+- SMTP SendPulse com STARTTLS ou TLS implícito.
+- E-mail responsivo em HTML com alternativa em texto puro.
+- Cabeçalhos de descadastro em um clique e `Precedence: bulk`.
 - Modo seguro `DRY_RUN`.
 - Link assinado de descadastro e lista permanente de supressão.
 - API FastAPI e dashboard agregado em JSON.
@@ -62,7 +64,7 @@ Placeholders permitidos: `{empresa}`, `{razao_social}` e `{cnpj}`. Evite colocar
 curl -X POST http://localhost:8000/api/campaigns/1/prepare -H "X-API-Key: SUA_API_KEY"
 ```
 
-Consulte as mensagens no banco ou, futuramente, pelo front-end. Depois de revisar:
+Consulte as mensagens no banco ou, futuramente, pelo front-end. A campanha padrão já inclui o layout HTML Tironi Tech. Depois de revisar:
 
 ```bash
 curl -X POST http://localhost:8000/api/campaigns/1/approve -H "X-API-Key: SUA_API_KEY"
@@ -81,7 +83,8 @@ O worker envia apenas no horário configurado e respeita todos os limites.
 ## Envio diário pelo GitHub Actions
 
 O workflow `Envio diário da campanha` conecta ao PostgreSQL definido em
-`DATABASE_URL`, sincroniza a base, prepara a campanha e processa até 300 mensagens.
+`DATABASE_URL`, sincroniza a base, prepara a campanha e processa até 30 mensagens,
+com espaçamento de seis minutos para iniciar o aquecimento de forma conservadora.
 Ele roda diariamente às 09:00 no horário de São Paulo.
 
 Antes de habilitar o envio real:
@@ -102,11 +105,11 @@ Enquanto não houver integração com a caixa de entrada, registre uma resposta 
 
 Se uma execução for interrompida durante o SMTP, a mensagem fica como
 `delivery_uncertain` e novos lotes são bloqueados para evitar duplicidade. Consulte
-o log da Brevo e resolva com `POST /api/messages/{id}/resolve-delivery`, enviando
+o histórico SMTP da SendPulse e resolva com `POST /api/messages/{id}/resolve-delivery`, enviando
 `{"delivered": true}` ou `{"delivered": false}`.
 
 Os runners hospedados pelo GitHub usam IPs de saída dinâmicos. O PostgreSQL precisa
-aceitar essas conexões e o bloqueio por IP das chaves SMTP na Brevo precisa ser
+aceitar essas conexões e o bloqueio por IP das credenciais SMTP na SendPulse precisa ser
 compatível com esse modelo. Para restringir por um único IP, use um runner próprio
 com saída fixa.
 
@@ -120,8 +123,20 @@ WhatsApp, Instagram, Facebook e LinkedIn não estão ativos nesta versão. Eles 
 - Publique `PUBLIC_BASE_URL` com HTTPS para o descadastro.
 - Mantenha `REQUIRE_MANUAL_APPROVAL=true` no início.
 - Não envie para endereços suprimidos ou funções fiscal/financeiro.
-- Cadastre webhooks da Brevo numa próxima etapa para delivery, bounce, spam e reply.
-- O SMTP confirma aceitação do relay, não entrega final. Até integrar webhooks, o status `sent` significa aceito pela Brevo.
+- Cadastre webhooks da SendPulse numa próxima etapa para delivery, bounce, spam e reply.
+- O SMTP confirma aceitação do relay, não entrega final. Até integrar webhooks, o status `sent` significa aceito pela SendPulse.
+
+## Checklist de entregabilidade na SendPulse
+
+1. Aguarde a aprovação do perfil SMTP.
+2. Valide `tironitech.com` e o endereço remetente na SendPulse.
+3. Publique exatamente os registros SPF e DKIM fornecidos no painel.
+4. Comece o DMARC com `p=none`, acompanhe os relatórios e só depois avance a política.
+5. Use um CNAME de rastreamento no próprio domínio, se o rastreamento estiver ativo.
+6. Aqueça o domínio gradualmente e envie apenas para contatos pertinentes e válidos.
+7. Monitore bounce, denúncia, descadastro e resposta; suprima imediatamente endereços ruins.
+
+Para a porta `587`, use `SMTP_STARTTLS=true` e `SMTP_SSL=false`. Para a porta `465`, use o inverso. Os valores exibidos na sua conta SendPulse prevalecem sobre os exemplos do projeto.
 
 ## Testes
 

@@ -23,6 +23,7 @@ class CampaignIn(BaseModel):
     name: str = Field(min_length=3, max_length=120)
     subject_template: str = Field(min_length=3, max_length=200)
     body_template: str = Field(min_length=10, max_length=10000)
+    body_html_template: str | None = Field(default=None, max_length=100000)
 
 
 class DeliveryResolutionIn(BaseModel):
@@ -49,8 +50,16 @@ def api_sync_leads():
 def create_campaign(data: CampaignIn):
     with db.connect() as conn:
         row = conn.execute(
-            "INSERT INTO outreach.campaigns (name,subject_template,body_template,requires_approval) VALUES (%s,%s,%s,%s) RETURNING id",
-            (data.name, data.subject_template, data.body_template, settings.require_approval),
+            "INSERT INTO outreach.campaigns "
+            "(name,subject_template,body_template,body_html_template,requires_approval) "
+            "VALUES (%s,%s,%s,%s,%s) RETURNING id",
+            (
+                data.name,
+                data.subject_template,
+                data.body_template,
+                data.body_html_template,
+                settings.require_approval,
+            ),
         ).fetchone()
         conn.commit()
     return {"id": row["id"]}

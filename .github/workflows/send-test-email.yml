@@ -36,9 +36,11 @@ jobs:
       TEST_SUBJECT: ${{ inputs.subject }}
       TEST_MESSAGE: ${{ inputs.message }}
       DRY_RUN: "false"
-      SMTP_HOST: smtp-relay.brevo.com
+      EMAIL_PROVIDER: sendpulse_smtp
+      SMTP_HOST: smtp-pulse.com
       SMTP_PORT: "587"
       SMTP_STARTTLS: "true"
+      SMTP_SSL: "false"
       SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
       SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
       OUTREACH_FROM_EMAIL: ${{ secrets.OUTREACH_FROM_EMAIL }}
@@ -95,7 +97,7 @@ jobs:
           print(f"Servidor: {host}:{port}")
           print(f"STARTTLS: {os.environ['SMTP_STARTTLS']}")
           print(f"Usuário preenchido: {bool(username)}")
-          print(f"Formato do usuário Brevo: {username.endswith('@smtp-brevo.com')}")
+          print(f"Provedor configurado: {os.environ.get('EMAIL_PROVIDER')}")
           print(f"Tamanho do usuário: {len(username)}")
           print(f"Senha preenchida: {bool(password)}")
           print(f"Tamanho da senha: {len(password)}")
@@ -137,9 +139,9 @@ jobs:
           except smtplib.SMTPAuthenticationError as exc:
               detail = exc.smtp_error.decode(errors="replace")
               print("::error title=Autenticação SMTP rejeitada::"
-                    f"A Brevo respondeu {exc.smtp_code}: {detail}")
-              print("Verifique se a chave SMTP está ativa, se não é uma API key e se a "
-                    "plataforma Transactional está habilitada.")
+                    f"A SendPulse respondeu {exc.smtp_code}: {detail}")
+              print("Verifique se o perfil SMTP foi aprovado e se login e senha foram "
+                    "copiados de Configurações SMTP > Geral.")
               raise RuntimeError(
                   f"Autenticação rejeitada pela Brevo ({exc.smtp_code}: {detail})"
               ) from None
@@ -154,19 +156,22 @@ jobs:
           python - <<'PY'
           import os
 
+          from outreach.campaign import HTML_TEMPLATE
           from outreach.config import Settings
           from outreach.providers.base import OutboundEmail
-          from outreach.providers.brevo_smtp import BrevoSmtpProvider
+          from outreach.providers.smtp import SmtpProvider
+          from outreach.service import render
 
           recipient = os.environ["TEST_RECIPIENT"]
           settings = Settings()
-          result = BrevoSmtpProvider(settings).send(
+          result = SmtpProvider(settings).send(
               OutboundEmail(
                   message_id=0,
                   to=recipient,
                   subject=os.environ["TEST_SUBJECT"],
                   text=os.environ["TEST_MESSAGE"],
                   unsubscribe_url=f"{settings.public_base_url}/unsubscribe/test",
+                  html=render(HTML_TEMPLATE, {"trade_name": "Empresa de teste"}),
               )
           )
 

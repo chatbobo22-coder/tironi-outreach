@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from .config import Settings
 from .db import Database
 from .providers.base import OutboundEmail
-from .providers.brevo_smtp import BrevoSmtpProvider, DryRunProvider
+from .providers.smtp import DryRunProvider, SmtpProvider
 from .security import unsubscribe_token
 from .service import inside_send_window
 
@@ -80,10 +80,17 @@ def process_one_result(
         )
     token = unsubscribe_token(row["id"], row["destination"], settings.unsubscribe_secret)
     url = f"{settings.public_base_url}/unsubscribe/{row['id']}?token={token}"
-    provider_name = "dry_run" if settings.dry_run else "brevo_smtp"
-    provider = DryRunProvider() if settings.dry_run else BrevoSmtpProvider(settings)
+    provider_name = "dry_run" if settings.dry_run else settings.email_provider
+    provider = DryRunProvider() if settings.dry_run else SmtpProvider(settings)
     result = provider.send(
-        OutboundEmail(row["id"], row["destination"], row["subject"] or "", row["body_text"], url)
+        OutboundEmail(
+            row["id"],
+            row["destination"],
+            row["subject"] or "",
+            row["body_text"],
+            url,
+            row.get("body_html"),
+        )
     )
     if result.accepted:
         conn.execute(

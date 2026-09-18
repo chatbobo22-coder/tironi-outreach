@@ -6,8 +6,11 @@ from outreach.campaign import (
     BODY_TEMPLATE,
     FOLLOW_UP_BODY_TEMPLATE,
     FOLLOW_UP_SUBJECT_TEMPLATE,
+    HTML_TEMPLATE,
     SUBJECT_TEMPLATE,
 )
+from outreach.providers.base import OutboundEmail
+from outreach.providers.smtp import build_message
 from outreach.security import unsubscribe_token, valid_unsubscribe_token
 from outreach.service import (
     contact_role,
@@ -32,6 +35,36 @@ def test_render():
     assert render("Olá, {empresa}", {"trade_name": "Loja X"}) == "Olá, Loja X"
     assert "Loja X" in render(SUBJECT_TEMPLATE, {"trade_name": "Loja X"})
     assert "Olá, equipe da Loja X" in render(BODY_TEMPLATE, {"trade_name": "Loja X"})
+    html = render(HTML_TEMPLATE, {"trade_name": "Loja X"})
+    assert "Olá, equipe da Loja X" in html
+    assert "{unsubscribe_url}" in html
+    assert "@media" in html
+
+
+def test_html_email_has_text_fallback_and_unsubscribe_headers():
+    settings = SimpleNamespace(
+        from_name="Tironi Tech",
+        from_email="tironi@tironitech.com",
+        reply_to="tironi@tironitech.com",
+    )
+    email = OutboundEmail(
+        message_id=42,
+        to="contato@empresa.com.br",
+        subject="Uma ideia para a Empresa",
+        text="Olá, Empresa.",
+        unsubscribe_url="https://example.com/unsubscribe/42",
+        html='<p>Olá.</p><a href="{unsubscribe_url}">Descadastrar</a>',
+    )
+
+    message = build_message(settings, email)
+
+    assert message.get_content_type() == "multipart/alternative"
+    assert message["Precedence"] == "bulk"
+    assert message["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+    assert (
+        "https://example.com/unsubscribe/42"
+        in message.get_body(preferencelist=("html",)).get_content()
+    )
 
 
 def test_unsubscribe_signature():
@@ -218,7 +251,7 @@ def test_daily_dry_run_does_not_sync_or_prepare(monkeypatch):
     monkeypatch.setattr(
         cli,
         "ensure_campaign",
-        lambda *args, commit: {"id": 7} if commit is False else None,
+        lambda *args, commit, **kwargs: {"id": 7} if commit is False else None,
     )
     monkeypatch.setattr(
         cli,

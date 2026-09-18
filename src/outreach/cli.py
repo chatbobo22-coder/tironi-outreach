@@ -8,6 +8,7 @@ from .campaign import (
     CAMPAIGN_NAME,
     FOLLOW_UP_BODY_TEMPLATE,
     FOLLOW_UP_SUBJECT_TEMPLATE,
+    HTML_TEMPLATE,
     SUBJECT_TEMPLATE,
 )
 from .config import Settings
@@ -38,6 +39,7 @@ def run_daily(settings: Settings, db: Database, limit: int, interval_seconds: in
                 SUBJECT_TEMPLATE,
                 BODY_TEMPLATE,
                 settings.daily_limit,
+                html_template=HTML_TEMPLATE,
                 commit=False,
             )
             prepared_initial = prepare_campaign(
@@ -98,6 +100,7 @@ def run_daily(settings: Settings, db: Database, limit: int, interval_seconds: in
             SUBJECT_TEMPLATE,
             BODY_TEMPLATE,
             settings.daily_limit,
+            html_template=HTML_TEMPLATE,
         )
         prepared_initial = prepare_campaign(conn, campaign["id"], settings)
         prepared_followups = 0

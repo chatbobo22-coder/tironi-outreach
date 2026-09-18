@@ -32,7 +32,10 @@ def render(template: str, lead: dict) -> str:
         "razao_social": lead.get("company_name") or "",
         "cnpj": lead.get("cnpj") or "",
     }
-    return template.format_map(values)
+    rendered = template
+    for name, value in values.items():
+        rendered = rendered.replace("{" + name + "}", str(value))
+    return rendered
 
 
 def sync_leads(conn, *, commit: bool = True) -> int:
@@ -102,6 +105,7 @@ def ensure_campaign(
     body_template: str,
     daily_limit: int,
     *,
+    html_template: str | None = None,
     commit: bool = True,
 ):
     campaign = conn.execute(
@@ -121,8 +125,9 @@ def ensure_campaign(
         campaign = conn.execute(
             """
             UPDATE outreach.campaigns
-            SET campaign_key=%s,name=%s,subject_template=%s,body_template=%s,status='active',
-                requires_approval=false,daily_limit=%s,updated_at=now()
+            SET campaign_key=%s,name=%s,subject_template=%s,body_template=%s,
+                body_html_template=%s,status='active',requires_approval=false,
+                daily_limit=%s,updated_at=now()
             WHERE id=%s
             RETURNING *
             """,
@@ -131,6 +136,7 @@ def ensure_campaign(
                 name,
                 subject_template,
                 body_template,
+                html_template,
                 daily_limit,
                 campaign["id"],
             ),
@@ -139,12 +145,12 @@ def ensure_campaign(
         campaign = conn.execute(
             """
             INSERT INTO outreach.campaigns
-              (campaign_key,name,subject_template,body_template,status,
+              (campaign_key,name,subject_template,body_template,body_html_template,status,
                requires_approval,daily_limit)
-            VALUES (%s,%s,%s,%s,'active',false,%s)
+            VALUES (%s,%s,%s,%s,%s,'active',false,%s)
             RETURNING *
             """,
-            (campaign_key, name, subject_template, body_template, daily_limit),
+            (campaign_key, name, subject_template, body_template, html_template, daily_limit),
         ).fetchone()
     if commit:
         conn.commit()
@@ -182,8 +188,8 @@ def prepare_campaign(
             """
             INSERT INTO outreach.messages
               (campaign_id,lead_id,channel,destination,destination_domain,subject,
-               body_text,status,scheduled_at,sequence_step)
-            VALUES (%s,%s,'email',%s,%s,%s,%s,%s,now(),0)
+               body_text,body_html,status,scheduled_at,sequence_step)
+            VALUES (%s,%s,'email',%s,%s,%s,%s,%s,%s,now(),0)
             ON CONFLICT (campaign_id,lead_id,channel,sequence_step) DO NOTHING
             """,
             (
@@ -193,6 +199,9 @@ def prepare_campaign(
                 lead["email_domain"],
                 render(campaign["subject_template"] or "Contato Tironi Tech", lead),
                 render(campaign["body_template"], lead),
+                render(campaign["body_html_template"], lead)
+                if campaign.get("body_html_template")
+                else None,
                 initial_status,
             ),
         )

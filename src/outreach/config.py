@@ -13,11 +13,13 @@ def flag(name: str, default: str = "false") -> bool:
 @dataclass(frozen=True)
 class Settings:
     database_url: str = os.getenv("DATABASE_URL", "postgresql://cnpj:cnpj@localhost:5432/cnpj")
-    smtp_host: str = os.getenv("SMTP_HOST", "smtp-relay.brevo.com")
+    email_provider: str = os.getenv("EMAIL_PROVIDER", "sendpulse_smtp")
+    smtp_host: str = os.getenv("SMTP_HOST", "smtp-pulse.com")
     smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
     smtp_username: str = os.getenv("SMTP_USERNAME", "")
     smtp_password: str = os.getenv("SMTP_PASSWORD", "")
     smtp_starttls: bool = flag("SMTP_STARTTLS", "true")
+    smtp_ssl: bool = flag("SMTP_SSL", "false")
     smtp_timeout: int = int(os.getenv("SMTP_TIMEOUT_SECONDS", "30"))
     from_email: str = os.getenv("OUTREACH_FROM_EMAIL", "")
     from_name: str = os.getenv("OUTREACH_FROM_NAME", "Tironi Tech")
@@ -39,6 +41,8 @@ class Settings:
     dry_run: bool = flag("DRY_RUN", "true")
 
     def validate_smtp(self) -> None:
+        if self.smtp_ssl and self.smtp_starttls:
+            raise RuntimeError("Use SMTP_SSL ou SMTP_STARTTLS, não os dois")
         missing = [
             name
             for name, value in {
