@@ -27,6 +27,7 @@ class Settings:
     public_base_url: str = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
     unsubscribe_secret: str = os.getenv("UNSUBSCRIBE_SECRET", "")
     api_key: str = os.getenv("API_KEY", "")
+    sendpulse_webhook_secret: str = os.getenv("SENDPULSE_WEBHOOK_SECRET", "")
     require_approval: bool = flag("REQUIRE_MANUAL_APPROVAL", "true")
     daily_limit: int = int(os.getenv("DAILY_EMAIL_LIMIT", "30"))
     hourly_limit: int = int(os.getenv("HOURLY_EMAIL_LIMIT", "8"))

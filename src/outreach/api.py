@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -24,6 +25,16 @@ class CampaignIn(BaseModel):
     subject_template: str = Field(min_length=3, max_length=200)
     body_template: str = Field(min_length=10, max_length=10000)
     body_html_template: str | None = Field(default=None, max_length=100000)
+    template_id: int | None = None
+    daily_limit: int = Field(default=30, ge=1, le=1000)
+
+
+class TemplateIn(BaseModel):
+    name: str = Field(min_length=3, max_length=120)
+    subject: str = Field(min_length=3, max_length=200)
+    preheader: str = Field(default="", max_length=240)
+    text_body: str = Field(min_length=10, max_length=10000)
+    html_body: str = Field(min_length=10, max_length=100000)
 
 
 class DeliveryResolutionIn(BaseModel):
@@ -51,18 +62,105 @@ def create_campaign(data: CampaignIn):
     with db.connect() as conn:
         row = conn.execute(
             "INSERT INTO outreach.campaigns "
-            "(name,subject_template,body_template,body_html_template,requires_approval) "
-            "VALUES (%s,%s,%s,%s,%s) RETURNING id",
+            "(name,subject_template,body_template,body_html_template,template_id,daily_limit,requires_approval) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (
                 data.name,
                 data.subject_template,
                 data.body_template,
                 data.body_html_template,
+                data.template_id,
+                data.daily_limit,
                 settings.require_approval,
             ),
         ).fetchone()
         conn.commit()
     return {"id": row["id"]}
+
+
+@app.get("/api/templates", dependencies=[Depends(auth)])
+def list_templates():
+    with db.connect() as conn:
+        return {
+            "templates": conn.execute(
+                """
+                SELECT t.*,
+                  count(m.id) FILTER (WHERE m.status IN ('sent','delivered')) AS sent_count,
+                  count(m.id) FILTER (WHERE EXISTS (
+                    SELECT 1 FROM outreach.events e
+                    WHERE e.message_id=m.id AND e.event_type IN ('open','opened')
+                  )) AS opened_count,
+                  count(m.id) FILTER (WHERE EXISTS (
+                    SELECT 1 FROM outreach.events e
+                    WHERE e.message_id=m.id AND e.event_type IN ('click','clicked')
+                  )) AS clicked_count,
+                  count(m.id) FILTER (WHERE m.status='replied') AS replied_count
+                FROM outreach.templates t
+                LEFT JOIN outreach.campaigns c ON c.template_id=t.id
+                LEFT JOIN outreach.messages m ON m.campaign_id=c.id
+                WHERE t.status='active'
+                GROUP BY t.id
+                ORDER BY t.updated_at DESC
+                """
+            ).fetchall()
+        }
+
+
+@app.post("/api/templates", dependencies=[Depends(auth)])
+def create_template(data: TemplateIn):
+    with db.connect() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO outreach.templates (name,subject,preheader,text_body,html_body)
+            VALUES (%s,%s,%s,%s,%s) RETURNING *
+            """,
+            (data.name, data.subject, data.preheader, data.text_body, data.html_body),
+        ).fetchone()
+        conn.commit()
+    return {"template": row}
+
+
+@app.put("/api/templates/{template_id}", dependencies=[Depends(auth)])
+def update_template(template_id: int, data: TemplateIn):
+    with db.connect() as conn:
+        row = conn.execute(
+            """
+            UPDATE outreach.templates
+            SET name=%s,subject=%s,preheader=%s,text_body=%s,html_body=%s,updated_at=now()
+            WHERE id=%s AND status='active' RETURNING *
+            """,
+            (
+                data.name,
+                data.subject,
+                data.preheader,
+                data.text_body,
+                data.html_body,
+                template_id,
+            ),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Modelo não encontrado")
+        conn.commit()
+    return {"template": row}
+
+
+@app.delete("/api/templates/{template_id}", dependencies=[Depends(auth)])
+def delete_template(template_id: int):
+    with db.connect() as conn:
+        in_use = conn.execute(
+            "SELECT count(*) AS total FROM outreach.campaigns WHERE template_id=%s",
+            (template_id,),
+        ).fetchone()
+        if in_use["total"]:
+            raise HTTPException(409, "Modelo utilizado por uma campanha")
+        result = conn.execute(
+            "UPDATE outreach.templates SET status='archived',updated_at=now() WHERE id=%s AND status='active'",
+            (template_id,),
+        )
+        if not result.rowcount:
+            raise HTTPException(404, "Modelo não encontrado")
+        conn.commit()
+    return {"deleted": True}
 
 
 @app.post("/api/campaigns/{campaign_id}/prepare", dependencies=[Depends(auth)])
@@ -98,6 +196,88 @@ def dashboard():
                 "SELECT * FROM outreach.v_dashboard ORDER BY campaign_id DESC"
             ).fetchall()
         }
+
+
+@app.post("/api/webhooks/sendpulse")
+def sendpulse_webhook(events: list[dict], secret: str | None = None):
+    if settings.sendpulse_webhook_secret and secret != settings.sendpulse_webhook_secret:
+        raise HTTPException(401, "Assinatura inválida")
+
+    accepted = 0
+    with db.connect() as conn:
+        for event in events:
+            event_type = str(event.get("event", "")).lower()
+            if event_type not in {
+                "delivered",
+                "undelivered",
+                "bounce",
+                "hard_bounce",
+                "soft_bounce",
+                "open",
+                "opened",
+                "click",
+                "clicked",
+            }:
+                continue
+            recipient = str(event.get("recipient") or event.get("email") or "")
+            provider_message_id = str(event.get("message_id") or event.get("task_id") or "")
+            message = None
+            if provider_message_id:
+                message = conn.execute(
+                    "SELECT id FROM outreach.messages WHERE provider_message_id=%s ORDER BY id DESC LIMIT 1",
+                    (provider_message_id,),
+                ).fetchone()
+            if not message and recipient:
+                message = conn.execute(
+                    "SELECT id FROM outreach.messages WHERE destination=%s ORDER BY created_at DESC LIMIT 1",
+                    (recipient,),
+                ).fetchone()
+            if not message:
+                continue
+
+            provider_event_id = ":".join(
+                [
+                    event_type,
+                    provider_message_id,
+                    recipient,
+                    str(event.get("timestamp", "")),
+                ]
+            )
+            inserted = conn.execute(
+                """
+                INSERT INTO outreach.events
+                  (message_id,event_type,provider_event_id,payload,occurred_at)
+                VALUES (%s,%s,%s,%s::jsonb,coalesce(to_timestamp(%s),now()))
+                ON CONFLICT (provider_event_id) DO NOTHING
+                """,
+                (
+                    message["id"],
+                    event_type,
+                    provider_event_id,
+                    json.dumps(event),
+                    int(event.get("timestamp") or 0) or None,
+                ),
+            )
+            if not inserted.rowcount:
+                continue
+            accepted += 1
+            if event_type == "delivered":
+                conn.execute(
+                    "UPDATE outreach.messages SET status='delivered',delivered_at=now(),updated_at=now() WHERE id=%s",
+                    (message["id"],),
+                )
+            elif event_type in {
+                "undelivered",
+                "bounce",
+                "hard_bounce",
+                "soft_bounce",
+            }:
+                conn.execute(
+                    "UPDATE outreach.messages SET status='bounced',updated_at=now() WHERE id=%s",
+                    (message["id"],),
+                )
+        conn.commit()
+    return {"received": len(events), "accepted": accepted}
 
 
 @app.post("/api/messages/{message_id}/reply", dependencies=[Depends(auth)])
