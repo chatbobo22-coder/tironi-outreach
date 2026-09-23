@@ -39,26 +39,19 @@ def render(template: str, lead: dict) -> str:
 
 
 def sync_leads(conn, *, commit: bool = True) -> int:
-    relations = conn.execute(
-        "SELECT to_regclass('cnpj.v_prospectos_outreach_v2') AS v2, "
-        "to_regclass('cnpj.v_prospectos_outreach') AS v1"
+    relation = conn.execute(
+        "SELECT to_regclass('cnpj.prospectos_qualificados') AS prospects"
     ).fetchone()
-    if relations["v2"]:
-        query = """
-        SELECT cnpj, razao_social, nome_fantasia, email, telefone_1,
-               lead_score, confidence_score, to_jsonb(v) AS payload
-        FROM cnpj.v_prospectos_outreach_v2 v
-        WHERE qualification_status = 'qualified'
-        """
-    elif relations["v1"]:
-        query = """
-        SELECT cnpj, razao_social, nome_fantasia, email, telefone_1,
-               digital_score AS lead_score, NULL::smallint AS confidence_score,
-               to_jsonb(v) AS payload
-        FROM cnpj.v_prospectos_outreach v
-        """
-    else:
-        raise RuntimeError("View de prospects do CNPJ ETL não encontrada")
+    if not relation["prospects"]:
+        raise RuntimeError("Tabela de prospects qualificados do CNPJ ETL não encontrada")
+    query = """
+    SELECT cnpj, razao_social, nome_fantasia, email, telefone_1,
+           lead_score, confidence_score, to_jsonb(p) AS payload
+    FROM cnpj.prospectos_qualificados p
+    WHERE qualification_status = 'qualified'
+      AND lead_quality IN ('A', 'B')
+      AND email IS NOT NULL
+    """
     count = 0
     for row in conn.execute(query).fetchall():
         email = normalize_email(row["email"])

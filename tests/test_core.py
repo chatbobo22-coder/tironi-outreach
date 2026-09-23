@@ -18,6 +18,7 @@ from outreach.service import (
     prepare_campaign,
     prepare_followups,
     render,
+    sync_leads,
 )
 
 
@@ -29,6 +30,47 @@ def test_email_normalization():
 def test_contact_roles():
     assert contact_role("vendas@empresa.com.br") == "sales"
     assert contact_role("fiscal@empresa.com.br") == "finance"
+
+
+class SyncLeadsConnection:
+    def __init__(self):
+        self.committed = False
+        self.source_query = ""
+
+    def execute(self, query, params=None):
+        if "to_regclass('cnpj.prospectos_qualificados')" in query:
+            return FakeResult(row={"prospects": "cnpj.prospectos_qualificados"})
+        if "FROM cnpj.prospectos_qualificados" in query:
+            self.source_query = query
+            return FakeResult(
+                rows=[
+                    {
+                        "cnpj": "12345678000190",
+                        "razao_social": "Empresa Ltda",
+                        "nome_fantasia": "Empresa",
+                        "email": "Contato@Empresa.com.br",
+                        "telefone_1": "11999999999",
+                        "lead_score": 85,
+                        "confidence_score": 90,
+                        "payload": {"lead_quality": "A"},
+                    }
+                ]
+            )
+        if "INSERT INTO outreach.leads" in query:
+            return FakeResult(rowcount=1)
+        raise AssertionError(query)
+
+    def commit(self):
+        self.committed = True
+
+
+def test_sync_leads_uses_only_current_qualified_ab_source():
+    conn = SyncLeadsConnection()
+
+    assert sync_leads(conn) == 1
+    assert conn.committed
+    assert "qualification_status = 'qualified'" in conn.source_query
+    assert "lead_quality IN ('A', 'B')" in conn.source_query
 
 
 def test_render():
