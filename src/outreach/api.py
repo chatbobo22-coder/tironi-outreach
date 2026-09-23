@@ -1,7 +1,8 @@
 import json
+from typing import Literal
 
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -39,6 +40,44 @@ class TemplateIn(BaseModel):
 
 class DeliveryResolutionIn(BaseModel):
     delivered: bool
+
+
+CrmServiceType = Literal[
+    "prospecting",
+    "qualification",
+    "demo",
+    "proposal",
+    "negotiation",
+    "follow_up",
+    "reactivation",
+    "after_sales",
+]
+CrmStage = Literal[
+    "ready",
+    "contacted",
+    "replied",
+    "qualified",
+    "meeting",
+    "proposal",
+    "won",
+    "lost",
+]
+
+
+class CrmCaseIn(BaseModel):
+    lead_id: int
+    service_type: CrmServiceType = "prospecting"
+    owner_name: str | None = Field(default=None, max_length=120)
+    notes: str | None = Field(default=None, max_length=10000)
+    next_action_at: str | None = None
+
+
+class CrmCaseUpdate(BaseModel):
+    service_type: CrmServiceType | None = None
+    stage: CrmStage | None = None
+    owner_name: str | None = Field(default=None, max_length=120)
+    notes: str | None = Field(default=None, max_length=10000)
+    next_action_at: str | None = None
 
 
 @app.exception_handler(psycopg.Error)
@@ -209,7 +248,13 @@ def dashboard():
 
 
 @app.get("/api/contacts", dependencies=[Depends(auth)])
-def contacts():
+def contacts(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=10, le=100),
+    q: str = Query(default="", max_length=120),
+):
+    search = f"%{q.strip()}%"
+    offset = (page - 1) * page_size
     with db.connect() as conn:
         rows = conn.execute(
             """
@@ -218,7 +263,14 @@ def contacts():
               coalesce(nullif(l.trade_name, ''), l.company_name) AS company,
               l.company_name,
               l.email,
+              l.phone,
+              l.whatsapp,
               coalesce(l.lead_score, 0) AS score,
+              coalesce(l.confidence_score, 0) AS confidence_score,
+              coalesce(l.source_payload->>'lead_quality', 'B') AS lead_quality,
+              coalesce(nullif(l.source_payload #>> '{sinais,intelligence_profile,profile_score}', '')::numeric, 0) AS profile_score,
+              coalesce(nullif(l.source_payload #>> '{sinais,intelligence_profile,data_confidence_score}', '')::numeric, 0) AS data_confidence_score,
+              coalesce(l.source_payload->'qualification_reasons', '[]'::jsonb) AS qualification_reasons,
               l.status,
               latest.subject AS last_subject,
               coalesce((
@@ -236,11 +288,188 @@ def contacts():
               LIMIT 1
             ) latest ON true
             WHERE l.email IS NOT NULL
+              AND (coalesce(l.trade_name, '') ILIKE %s
+                OR l.company_name ILIKE %s OR l.email ILIKE %s OR l.cnpj ILIKE %s)
             ORDER BY l.lead_score DESC NULLS LAST, l.id DESC
-            LIMIT 500
-            """
+            LIMIT %s OFFSET %s
+            """,
+            (search, search, search, search, page_size, offset),
         ).fetchall()
-    return {"contacts": rows}
+        totals = conn.execute(
+            """
+            SELECT
+              count(*) AS total,
+              count(*) FILTER (WHERE source_payload->>'lead_quality' = 'A') AS quality_a,
+              count(*) FILTER (WHERE source_payload->>'lead_quality' = 'B') AS quality_b,
+              count(*) FILTER (WHERE whatsapp IS NOT NULL AND whatsapp <> '') AS with_whatsapp,
+              count(*) FILTER (WHERE source_payload->'qualification_reasons' ? 'perfil_publico_verificado') AS public_profile,
+              round(avg(coalesce(lead_score, 0)), 1) AS average_score
+            FROM outreach.leads
+            WHERE email IS NOT NULL
+            """
+        ).fetchone()
+        filtered = conn.execute(
+            """
+            SELECT count(*) AS total
+            FROM outreach.leads l
+            WHERE l.email IS NOT NULL
+              AND (coalesce(l.trade_name, '') ILIKE %s
+                OR l.company_name ILIKE %s OR l.email ILIKE %s OR l.cnpj ILIKE %s)
+            """,
+            (search, search, search, search),
+        ).fetchone()["total"]
+    return {
+        "contacts": rows,
+        "metrics": totals,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": filtered,
+            "total_pages": max(1, (filtered + page_size - 1) // page_size),
+        },
+    }
+
+
+@app.get("/api/crm", dependencies=[Depends(auth)])
+def crm_cases(q: str = Query(default="", max_length=120)):
+    search = f"%{q.strip()}%"
+    with db.connect() as conn:
+        cases = conn.execute(
+            """
+            SELECT c.*, coalesce(nullif(l.trade_name, ''), l.company_name) AS company,
+              l.company_name, l.cnpj, l.email, l.phone, l.whatsapp,
+              coalesce(l.lead_score, 0) AS score,
+              coalesce(l.source_payload->>'lead_quality', 'B') AS lead_quality
+            FROM outreach.crm_cases c
+            JOIN outreach.leads l ON l.id=c.lead_id
+            WHERE coalesce(l.trade_name, '') ILIKE %s
+              OR l.company_name ILIKE %s OR l.email ILIKE %s OR l.cnpj ILIKE %s
+            ORDER BY c.updated_at DESC, c.id DESC
+            """,
+            (search, search, search, search),
+        ).fetchall()
+    return {"cases": cases}
+
+
+@app.post("/api/crm", dependencies=[Depends(auth)], status_code=201)
+def create_crm_case(data: CrmCaseIn):
+    with db.connect() as conn:
+        lead = conn.execute(
+            "SELECT id FROM outreach.leads WHERE id=%s", (data.lead_id,)
+        ).fetchone()
+        if not lead:
+            raise HTTPException(404, "Lead não encontrado")
+        row = conn.execute(
+            """
+            INSERT INTO outreach.crm_cases
+              (lead_id,service_type,owner_name,notes,next_action_at)
+            VALUES (%s,%s,%s,%s,%s)
+            ON CONFLICT (lead_id) DO UPDATE SET
+              service_type=EXCLUDED.service_type,
+              owner_name=coalesce(EXCLUDED.owner_name,outreach.crm_cases.owner_name),
+              notes=coalesce(EXCLUDED.notes,outreach.crm_cases.notes),
+              next_action_at=coalesce(EXCLUDED.next_action_at,outreach.crm_cases.next_action_at),
+              updated_at=now()
+            RETURNING *
+            """,
+            (
+                data.lead_id,
+                data.service_type,
+                data.owner_name,
+                data.notes,
+                data.next_action_at,
+            ),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO outreach.crm_case_events (case_id,event_type,to_stage,note)
+            VALUES (%s,'created',%s,%s)
+            """,
+            (row["id"], row["stage"], data.notes),
+        )
+        conn.execute(
+            "UPDATE outreach.leads SET status=%s,updated_at=now() WHERE id=%s",
+            (row["stage"], data.lead_id),
+        )
+        conn.commit()
+    return {"case": row}
+
+
+@app.patch("/api/crm/{case_id}", dependencies=[Depends(auth)])
+def update_crm_case(case_id: int, data: CrmCaseUpdate):
+    changes = data.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(422, "Nenhuma alteração informada")
+    allowed = {"service_type", "stage", "owner_name", "notes", "next_action_at"}
+    assignments = [f"{key}=%s" for key in changes if key in allowed]
+    values = [changes[key] for key in changes if key in allowed]
+    with db.connect() as conn:
+        current = conn.execute(
+            "SELECT * FROM outreach.crm_cases WHERE id=%s", (case_id,)
+        ).fetchone()
+        if not current:
+            raise HTTPException(404, "Atendimento não encontrado")
+        row = conn.execute(
+            f"UPDATE outreach.crm_cases SET {', '.join(assignments)}, updated_at=now() WHERE id=%s RETURNING *",
+            (*values, case_id),
+        ).fetchone()
+        if data.stage and data.stage != current["stage"]:
+            conn.execute(
+                """
+                INSERT INTO outreach.crm_case_events
+                  (case_id,event_type,from_stage,to_stage,note)
+                VALUES (%s,'stage_changed',%s,%s,%s)
+                """,
+                (case_id, current["stage"], data.stage, data.notes),
+            )
+            conn.execute(
+                "UPDATE outreach.leads SET status=%s,updated_at=now() WHERE id=%s",
+                (data.stage, current["lead_id"]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO outreach.crm_case_events (case_id,event_type,note) VALUES (%s,'updated',%s)",
+                (case_id, data.notes),
+            )
+        conn.commit()
+    return {"case": row}
+
+
+@app.get("/api/crm/leads/{lead_id}", dependencies=[Depends(auth)])
+def crm_lead_detail(lead_id: int):
+    with db.connect() as conn:
+        lead = conn.execute(
+            """
+            SELECT l.*, coalesce(nullif(l.trade_name, ''), l.company_name) AS company,
+              coalesce(l.source_payload->>'lead_quality', 'B') AS lead_quality,
+              coalesce(nullif(l.source_payload #>> '{sinais,intelligence_profile,profile_score}', '')::numeric, 0) AS profile_score,
+              coalesce(nullif(l.source_payload #>> '{sinais,intelligence_profile,data_confidence_score}', '')::numeric, 0) AS data_confidence_score
+            FROM outreach.leads l WHERE l.id=%s
+            """,
+            (lead_id,),
+        ).fetchone()
+        if not lead:
+            raise HTTPException(404, "Lead não encontrado")
+        case = conn.execute(
+            "SELECT * FROM outreach.crm_cases WHERE lead_id=%s", (lead_id,)
+        ).fetchone()
+        messages = conn.execute(
+            """
+            SELECT m.id,m.channel,m.subject,m.status,m.sent_at,m.replied_at,m.updated_at,
+              c.name AS campaign
+            FROM outreach.messages m
+            JOIN outreach.campaigns c ON c.id=m.campaign_id
+            WHERE m.lead_id=%s ORDER BY m.created_at DESC LIMIT 20
+            """,
+            (lead_id,),
+        ).fetchall()
+        history = []
+        if case:
+            history = conn.execute(
+                "SELECT * FROM outreach.crm_case_events WHERE case_id=%s ORDER BY created_at DESC LIMIT 50",
+                (case["id"],),
+            ).fetchall()
+    return {"lead": lead, "case": case, "messages": messages, "history": history}
 
 
 @app.get("/api/queue", dependencies=[Depends(auth)])

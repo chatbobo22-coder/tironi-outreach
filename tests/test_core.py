@@ -50,6 +50,7 @@ class SyncLeadsConnection:
                         "nome_fantasia": "Empresa",
                         "email": "Contato@Empresa.com.br",
                         "telefone_1": "11999999999",
+                        "whatsapp_url": "https://wa.me/5511999999999",
                         "lead_score": 85,
                         "confidence_score": 90,
                         "payload": {"lead_quality": "A"},
@@ -71,6 +72,7 @@ def test_sync_leads_uses_only_current_qualified_ab_source():
     assert conn.committed
     assert "qualification_status = 'qualified'" in conn.source_query
     assert "lead_quality IN ('A', 'B')" in conn.source_query
+    assert "whatsapp_url" in conn.source_query
 
 
 def test_render():

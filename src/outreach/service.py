@@ -45,7 +45,7 @@ def sync_leads(conn, *, commit: bool = True) -> int:
     if not relation["prospects"]:
         raise RuntimeError("Tabela de prospects qualificados do CNPJ ETL não encontrada")
     query = """
-    SELECT cnpj, razao_social, nome_fantasia, email, telefone_1,
+    SELECT cnpj, razao_social, nome_fantasia, email, telefone_1, whatsapp_url,
            lead_score, confidence_score, to_jsonb(p) AS payload
     FROM cnpj.prospectos_qualificados p
     WHERE qualification_status = 'qualified'
@@ -61,13 +61,14 @@ def sync_leads(conn, *, commit: bool = True) -> int:
         result = conn.execute(
             """
             INSERT INTO outreach.leads
-              (cnpj,company_name,trade_name,email,email_domain,phone,contact_role,
+              (cnpj,company_name,trade_name,email,email_domain,phone,whatsapp,contact_role,
                lead_score,confidence_score,source_payload,status,updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ready',now())
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ready',now())
             ON CONFLICT (cnpj) DO UPDATE SET
               company_name=EXCLUDED.company_name, trade_name=EXCLUDED.trade_name,
               email=EXCLUDED.email, email_domain=EXCLUDED.email_domain,
-              phone=EXCLUDED.phone, contact_role=EXCLUDED.contact_role,
+              phone=EXCLUDED.phone, whatsapp=EXCLUDED.whatsapp,
+              contact_role=EXCLUDED.contact_role,
               lead_score=EXCLUDED.lead_score, confidence_score=EXCLUDED.confidence_score,
               source_payload=EXCLUDED.source_payload, updated_at=now()
             """,
@@ -78,6 +79,7 @@ def sync_leads(conn, *, commit: bool = True) -> int:
                 email,
                 domain,
                 row["telefone_1"],
+                row["whatsapp_url"],
                 contact_role(email),
                 row["lead_score"],
                 row["confidence_score"],
