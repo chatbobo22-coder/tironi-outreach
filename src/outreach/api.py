@@ -441,10 +441,44 @@ def crm_lead_detail(lead_id: int):
         lead = conn.execute(
             """
             SELECT l.*, coalesce(nullif(l.trade_name, ''), l.company_name) AS company,
-              coalesce(l.source_payload->>'lead_quality', 'B') AS lead_quality,
-              coalesce(nullif(l.source_payload #>> '{sinais,intelligence_profile,profile_score}', '')::numeric, 0) AS profile_score,
-              coalesce(nullif(l.source_payload #>> '{sinais,intelligence_profile,data_confidence_score}', '')::numeric, 0) AS data_confidence_score
-            FROM outreach.leads l WHERE l.id=%s
+              coalesce(l.lead_score, 0) AS score,
+              coalesce(p.lead_quality, l.source_payload->>'lead_quality', 'B') AS lead_quality,
+              coalesce(ip.profile_score, 0) AS profile_score,
+              coalesce(ip.profile_quality, p.lead_quality) AS profile_quality,
+              coalesce(ip.data_confidence_score, 0) AS data_confidence_score,
+              v.natureza_juridica, v.natureza_juridica_descricao,
+              v.porte, v.identificador_matriz_filial, v.situacao_cadastral,
+              v.data_inicio_atividade, v.cnae_fiscal_principal,
+              v.cnae_principal_descricao, v.cnaes_fiscais_secundarios,
+              v.tipo_logradouro, v.logradouro, v.numero, v.complemento,
+              v.bairro, v.cep, coalesce(p.uf, v.uf) AS uf,
+              coalesce(p.municipio_descricao, v.municipio_descricao) AS municipio_descricao,
+              p.site_url, p.site_final_url, p.site_ativo, p.plataforma,
+              p.instagram_url, p.linkedin_url, p.digital_score, p.digital_maturity,
+              p.presence_score, p.commerce_score, p.fit_score, p.pain_score,
+              p.presence_maturity, p.commerce_maturity, p.lead_classification,
+              p.decisor_nome, p.decisor_qualificacao,
+              coalesce(ip.estimated_capacity_band, p.faixa_faturamento_estimada) AS faixa_faturamento_estimada,
+              p.capital_social, p.opcao_mei, p.opcao_simples,
+              p.qualification_status, p.qualification_reasons, p.rejection_reasons,
+              p.contact_channel, p.contact_value, p.contact_confidence,
+              p.qualification_version, p.qualified_at, p.last_qualified_at,
+              ip.capacity_score, ip.intent_score, ip.decision_makers_count,
+              ip.signals_count, ip.sources_success, ip.sources_pending,
+              ip.summary AS intelligence_summary, ip.reasons AS intelligence_reasons,
+              ip.intent_last_seen_at, ip.commercial_temperature,
+              ip.last_commercial_event_at, ip.feedback_events_count,
+              ev.deliverability_status, ev.risk_score AS email_risk_score,
+              ev.mx_valid, ev.disposable AS email_disposable,
+              ev.reason_codes AS email_reason_codes,
+              gm.group_key, gm.is_primary AS group_primary
+            FROM outreach.leads l
+            LEFT JOIN cnpj.prospectos_qualificados p ON p.cnpj=l.cnpj
+            LEFT JOIN cnpj.v_empresas_completas v ON v.cnpj=l.cnpj
+            LEFT JOIN intelligence.company_profiles ip ON ip.cnpj=l.cnpj
+            LEFT JOIN intelligence.email_verifications ev ON ev.cnpj=l.cnpj
+            LEFT JOIN intelligence.company_group_members gm ON gm.cnpj=l.cnpj
+            WHERE l.id=%s
             """,
             (lead_id,),
         ).fetchone()
@@ -463,13 +497,67 @@ def crm_lead_detail(lead_id: int):
             """,
             (lead_id,),
         ).fetchall()
+        people = conn.execute(
+            """
+            SELECT id,full_name,role_title,relationship_type,linkedin_url,
+              business_email,business_phone,is_decision_maker,confidence,
+              source_code,source_url,priority_score
+            FROM intelligence.company_people
+            WHERE cnpj=%s AND active=true
+            ORDER BY is_decision_maker DESC, priority_score DESC, confidence DESC
+            LIMIT 25
+            """,
+            (lead["cnpj"],),
+        ).fetchall()
+        signals = conn.execute(
+            """
+            SELECT id,source_code,signal_type,category,title,description,score,
+              confidence,observed_at,expires_at,source_url
+            FROM intelligence.company_signals
+            WHERE cnpj=%s AND (expires_at IS NULL OR expires_at>now())
+            ORDER BY observed_at DESC, abs(score) DESC
+            LIMIT 40
+            """,
+            (lead["cnpj"],),
+        ).fetchall()
+        technologies = conn.execute(
+            """
+            SELECT technology,category,confidence,source_code,source_url,observed_at
+            FROM intelligence.company_technologies
+            WHERE cnpj=%s AND active=true
+            ORDER BY confidence DESC,technology
+            LIMIT 30
+            """,
+            (lead["cnpj"],),
+        ).fetchall()
+        sources = conn.execute(
+            """
+            SELECT state.source_code,registry.display_name,state.status,state.records_found,
+              state.last_checked_at,state.last_error
+            FROM intelligence.company_source_state state
+            LEFT JOIN intelligence.source_registry registry
+              ON registry.source_code=state.source_code
+            WHERE state.cnpj=%s
+            ORDER BY registry.display_name NULLS LAST,state.source_code
+            """,
+            (lead["cnpj"],),
+        ).fetchall()
         history = []
         if case:
             history = conn.execute(
                 "SELECT * FROM outreach.crm_case_events WHERE case_id=%s ORDER BY created_at DESC LIMIT 50",
                 (case["id"],),
             ).fetchall()
-    return {"lead": lead, "case": case, "messages": messages, "history": history}
+    return {
+        "lead": lead,
+        "case": case,
+        "messages": messages,
+        "history": history,
+        "people": people,
+        "signals": signals,
+        "technologies": technologies,
+        "sources": sources,
+    }
 
 
 @app.get("/api/queue", dependencies=[Depends(auth)])
