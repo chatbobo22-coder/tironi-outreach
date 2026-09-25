@@ -31,6 +31,7 @@ jobs:
 
       - name: Disparar lote no backend
         run: |
+          set -o pipefail
           curl --silent --show-error --fail-with-body \
             --max-time 240 \
             --request POST \

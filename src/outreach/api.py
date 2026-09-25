@@ -1,5 +1,7 @@
 import json
 from datetime import datetime
+import hashlib
+import hmac
 from typing import Literal
 
 import psycopg
@@ -431,8 +433,15 @@ def send_campaign_batch(
 
 @app.post("/api/dispatch/hourly")
 def dispatch_hourly(x_cron_secret: str | None = Header(default=None)):
-    """Ponto privado chamado pelo Supabase Cron; a cota é validada no banco."""
-    if not settings.cron_secret or x_cron_secret != settings.cron_secret:
+    """Ponto privado chamado pelo agendador; a cota é validada no banco."""
+    supplied = x_cron_secret or ""
+    raw_match = bool(settings.cron_secret) and hmac.compare_digest(
+        supplied, settings.cron_secret
+    )
+    digest_match = bool(settings.cron_secret_sha256) and hmac.compare_digest(
+        hashlib.sha256(supplied.encode()).hexdigest(), settings.cron_secret_sha256
+    )
+    if not (raw_match or digest_match):
         raise HTTPException(401, "Cron não autorizado")
     if settings.dry_run:
         raise HTTPException(409, "Envio automático bloqueado enquanto DRY_RUN estiver ativo")

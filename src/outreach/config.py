@@ -28,6 +28,10 @@ class Settings:
     unsubscribe_secret: str = os.getenv("UNSUBSCRIBE_SECRET", "")
     api_key: str = os.getenv("API_KEY", "")
     cron_secret: str = os.getenv("CRON_SECRET") or os.getenv("UNSUBSCRIBE_SECRET", "")
+    cron_secret_sha256: str = os.getenv(
+        "CRON_SECRET_SHA256",
+        "420aa8eecfb883d88e5c76d7171d53dae40caec1004051394ffdd8fc8b7bc31f",
+    )
     sendpulse_webhook_secret: str = os.getenv("SENDPULSE_WEBHOOK_SECRET", "")
     require_approval: bool = flag("REQUIRE_MANUAL_APPROVAL", "true")
     daily_limit: int = int(os.getenv("DAILY_EMAIL_LIMIT", "400"))

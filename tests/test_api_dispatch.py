@@ -23,6 +23,7 @@ def dispatch_settings(**overrides):
     values = {
         "dry_run": False,
         "cron_secret": "secret-value",
+        "cron_secret_sha256": "",
         "hourly_limit": 50,
         "validate_smtp": lambda: None,
     }
@@ -37,6 +38,29 @@ def test_hourly_dispatch_requires_dedicated_secret(monkeypatch):
         api.dispatch_hourly("wrong")
 
     assert exc.value.status_code == 401
+
+
+def test_hourly_dispatch_accepts_hashed_secret(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "settings",
+        dispatch_settings(
+            cron_secret="different-environment-secret",
+            cron_secret_sha256=(
+                "b647d0ec3a15215ba8f8a9e5e4474dcfcf363f11a9e8a4278060ea55b103f3eb"
+            ),
+        ),
+    )
+    monkeypatch.setattr(api, "db", FakeDatabase())
+    monkeypatch.setattr(
+        api,
+        "process_batch",
+        lambda *_args: {"processed": 0, "sent": 0, "failed": 0},
+    )
+
+    result = api.dispatch_hourly("github-cron-secret")
+
+    assert result["processed"] == 0
 
 
 def test_hourly_dispatch_processes_up_to_hourly_limit(monkeypatch):
