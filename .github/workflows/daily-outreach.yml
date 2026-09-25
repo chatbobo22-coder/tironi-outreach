@@ -2,8 +2,10 @@ name: Envio horário dos melhores leads
 
 on:
   schedule:
-    # 09h–16h em São Paulo: 8 janelas de 50 = teto gratuito de 400/dia.
-    - cron: "0 12-19 * * 1-5"
+    # Tentativas fora do minuto zero evitam o pico do scheduler do GitHub.
+    # A trava transacional no banco limita o total real a 50 em qualquer hora,
+    # mesmo que mais de uma tentativa seja iniciada.
+    - cron: "7,22,37,52 12-19 * * 1-5"
   workflow_dispatch:
     inputs:
       limit:
@@ -38,7 +40,7 @@ jobs:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
       RUN_LIMIT: ${{ github.event_name == 'schedule' && '50' || inputs.limit }}
-      SEND_INTERVAL_SECONDS: ${{ github.event_name == 'schedule' && '72' || inputs.interval_seconds }}
+      SEND_INTERVAL_SECONDS: ${{ github.event_name == 'schedule' && '2' || inputs.interval_seconds }}
       REQUIRE_MANUAL_APPROVAL: "false"
       DAILY_EMAIL_LIMIT: "400"
       HOURLY_EMAIL_LIMIT: "50"
