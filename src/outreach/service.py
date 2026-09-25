@@ -1,6 +1,7 @@
 from datetime import datetime
 from email.utils import parseaddr
 from pathlib import Path
+import re
 from zoneinfo import ZoneInfo
 
 from .config import Settings
@@ -133,12 +134,28 @@ def normalize_email(value: str | None) -> str | None:
 
 
 def contact_role(email: str) -> str:
-    local = email.split("@", 1)[0]
+    local, _, domain = email.lower().partition("@")
     if local in {"vendas", "comercial", "sales"}:
         return "sales"
     if local in {"contato", "atendimento", "relacionamento", "sac"}:
         return "support"
-    if local in {"financeiro", "fiscal", "nfe", "contabilidade"}:
+    blocked_tokens = {
+        "financeiro",
+        "financeira",
+        "fiscal",
+        "nfe",
+        "nfse",
+        "contabilidade",
+        "contabil",
+        "contaspagar",
+        "contasapagar",
+        "contaapagar",
+        "cobranca",
+        "juridico",
+        "rh",
+    }
+    local_tokens = set(re.split(r"[._+-]+", local))
+    if local_tokens & blocked_tokens or "contabil" in domain:
         return "finance"
     return "general"
 
@@ -174,7 +191,9 @@ def sync_leads(conn, *, commit: bool = True) -> int:
             WHEN split_part(lower(btrim(p.email)),'@',1)
               IN ('contato','atendimento','relacionamento','sac') THEN 'support'
             WHEN split_part(lower(btrim(p.email)),'@',1)
-              IN ('financeiro','fiscal','nfe','contabilidade') THEN 'finance'
+              ~ '(^|[._+-])(financeiro|financeira|fiscal|nfe|nfse|contabilidade|contabil|contaspagar|contasapagar|contaapagar|cobranca|juridico|rh)([._+-]|$)'
+              OR split_part(lower(btrim(p.email)),'@',2) LIKE '%contabil%'
+              THEN 'finance'
             ELSE 'general'
           END,
           p.lead_score,p.confidence_score,

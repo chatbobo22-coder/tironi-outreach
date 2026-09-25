@@ -28,41 +28,63 @@ from .worker import (
 )
 
 
+def active_scheduled_campaigns(conn) -> list[dict]:
+    return conn.execute(
+        """
+        SELECT * FROM outreach.campaigns
+        WHERE status='active'
+          AND (scheduled_start_at IS NULL OR scheduled_start_at <= now())
+        ORDER BY scheduled_start_at NULLS FIRST, launched_at NULLS FIRST, id
+        """
+    ).fetchall()
+
+
+def campaigns_for_dispatch(conn, settings: Settings, *, commit: bool) -> list[dict]:
+    campaigns = active_scheduled_campaigns(conn)
+    if campaigns:
+        return campaigns
+    return [
+        ensure_campaign(
+            conn,
+            CAMPAIGN_KEY,
+            CAMPAIGN_NAME,
+            SUBJECT_TEMPLATE,
+            BODY_TEMPLATE,
+            settings.daily_limit,
+            html_template=HTML_TEMPLATE,
+            commit=commit,
+        )
+    ]
+
+
 def run_daily(settings: Settings, db: Database, limit: int, interval_seconds: int) -> dict:
     with db.connect() as conn:
         if settings.dry_run:
             synced = sync_leads(conn, commit=False)
-            campaign = ensure_campaign(
-                conn,
-                CAMPAIGN_KEY,
-                CAMPAIGN_NAME,
-                SUBJECT_TEMPLATE,
-                BODY_TEMPLATE,
-                settings.daily_limit,
-                html_template=HTML_TEMPLATE,
-                commit=False,
-            )
-            prepared_initial = prepare_campaign(
-                conn,
-                campaign["id"],
-                settings,
-                commit=False,
+            campaigns = campaigns_for_dispatch(conn, settings, commit=False)
+            prepared_initial = sum(
+                prepare_campaign(conn, campaign["id"], settings, commit=False)
+                for campaign in campaigns
             )
             prepared_followups = 0
             if settings.max_followups > 0:
-                prepared_followups = prepare_followups(
-                    conn,
-                    campaign["id"],
-                    FOLLOW_UP_SUBJECT_TEMPLATE,
-                    FOLLOW_UP_BODY_TEMPLATE,
-                    settings.followup_delay_days,
-                    commit=False,
+                prepared_followups = sum(
+                    prepare_followups(
+                        conn,
+                        campaign["id"],
+                        FOLLOW_UP_SUBJECT_TEMPLATE,
+                        FOLLOW_UP_BODY_TEMPLATE,
+                        settings.followup_delay_days,
+                        commit=False,
+                    )
+                    for campaign in campaigns
                 )
-            queued = queued_for_campaign(conn, campaign["id"])
+            queued = queued_for_campaign(conn, None)
             remaining = max(0, settings.daily_limit - sent_today(conn, settings))
             conn.rollback()
             return {
-                "campaign_id": campaign["id"],
+                "campaign_id": campaigns[0]["id"],
+                "campaign_ids": [campaign["id"] for campaign in campaigns],
                 "synced": synced,
                 "prepared_initial": prepared_initial,
                 "prepared_followups": prepared_followups,
@@ -93,36 +115,34 @@ def run_daily(settings: Settings, db: Database, limit: int, interval_seconds: in
                 "dry_run": False,
             }
         synced = sync_leads(conn)
-        campaign = ensure_campaign(
-            conn,
-            CAMPAIGN_KEY,
-            CAMPAIGN_NAME,
-            SUBJECT_TEMPLATE,
-            BODY_TEMPLATE,
-            settings.daily_limit,
-            html_template=HTML_TEMPLATE,
+        campaigns = campaigns_for_dispatch(conn, settings, commit=True)
+        prepared_initial = sum(
+            prepare_campaign(conn, campaign["id"], settings) for campaign in campaigns
         )
-        prepared_initial = prepare_campaign(conn, campaign["id"], settings)
         prepared_followups = 0
         if settings.max_followups > 0:
-            prepared_followups = prepare_followups(
-                conn,
-                campaign["id"],
-                FOLLOW_UP_SUBJECT_TEMPLATE,
-                FOLLOW_UP_BODY_TEMPLATE,
-                settings.followup_delay_days,
+            prepared_followups = sum(
+                prepare_followups(
+                    conn,
+                    campaign["id"],
+                    FOLLOW_UP_SUBJECT_TEMPLATE,
+                    FOLLOW_UP_BODY_TEMPLATE,
+                    settings.followup_delay_days,
+                )
+                for campaign in campaigns
             )
 
         settings.validate_smtp()
         delivery = process_batch(
             conn,
             settings,
-            campaign["id"],
+            None,
             limit,
             interval_seconds,
         )
     return {
-        "campaign_id": campaign["id"],
+        "campaign_id": campaigns[0]["id"],
+        "campaign_ids": [campaign["id"] for campaign in campaigns],
         "synced": synced,
         "prepared_initial": prepared_initial,
         "prepared_followups": prepared_followups,

@@ -51,6 +51,7 @@ class CampaignIn(BaseModel):
     min_score: int | None = Field(default=None, ge=0, le=100)
     max_score: int | None = Field(default=None, ge=0, le=100)
     scheduled_at: datetime | None = None
+    launch: bool = False
 
 
 class TemplateIn(BaseModel):
@@ -171,8 +172,14 @@ def create_campaign(data: CampaignIn):
             ),
         ).fetchone()
         audience = audience_count(conn, row)
+        launch_result = _launch_campaign(conn, row["id"]) if data.launch else None
         conn.commit()
-    return {"id": row["id"], "audience": audience}
+    return {
+        "id": row["id"],
+        "audience": audience,
+        "status": "active" if launch_result else "draft",
+        "queued": launch_result["queued"] if launch_result else 0,
+    }
 
 
 @app.post("/api/audience/estimate", dependencies=[Depends(auth)])
@@ -327,36 +334,41 @@ def api_prepare(campaign_id: int):
 def launch_campaign(campaign_id: int):
     with db.connect() as conn:
         ensure_dispatch_schema(conn)
-        campaign = conn.execute(
-            "SELECT * FROM outreach.campaigns WHERE id=%s", (campaign_id,)
-        ).fetchone()
-        if not campaign:
-            raise HTTPException(404, "Campanha não encontrada")
-        prepared = prepare_campaign(conn, campaign_id, settings, commit=False)
-        approved = conn.execute(
-            """
-            UPDATE outreach.messages
-            SET status='queued',approved_at=now(),updated_at=now()
-            WHERE campaign_id=%s AND status='pending_approval'
-            """,
-            (campaign_id,),
-        ).rowcount
-        conn.execute(
-            """
-            UPDATE outreach.campaigns
-            SET status='active',launched_at=coalesce(launched_at,now()),updated_at=now()
-            WHERE id=%s
-            """,
-            (campaign_id,),
-        )
-        queued = conn.execute(
-            """
-            SELECT count(*) AS total FROM outreach.messages
-            WHERE campaign_id=%s AND status IN ('approved','queued')
-            """,
-            (campaign_id,),
-        ).fetchone()["total"]
+        result = _launch_campaign(conn, campaign_id)
         conn.commit()
+    return result
+
+
+def _launch_campaign(conn, campaign_id: int) -> dict[str, int]:
+    campaign = conn.execute(
+        "SELECT * FROM outreach.campaigns WHERE id=%s", (campaign_id,)
+    ).fetchone()
+    if not campaign:
+        raise HTTPException(404, "Campanha não encontrada")
+    prepared = prepare_campaign(conn, campaign_id, settings, commit=False)
+    approved = conn.execute(
+        """
+        UPDATE outreach.messages
+        SET status='queued',approved_at=now(),updated_at=now()
+        WHERE campaign_id=%s AND status='pending_approval'
+        """,
+        (campaign_id,),
+    ).rowcount
+    conn.execute(
+        """
+        UPDATE outreach.campaigns
+        SET status='active',launched_at=coalesce(launched_at,now()),updated_at=now()
+        WHERE id=%s
+        """,
+        (campaign_id,),
+    )
+    queued = conn.execute(
+        """
+        SELECT count(*) AS total FROM outreach.messages
+        WHERE campaign_id=%s AND status IN ('approved','queued')
+        """,
+        (campaign_id,),
+    ).fetchone()["total"]
     return {"prepared": prepared, "approved": approved, "queued": queued}
 
 
@@ -800,6 +812,8 @@ def queue_status():
               m.provider,
               m.last_error,
               coalesce(l.lead_score,0) AS score,
+              coalesce(l.confidence_score,0) AS confidence_score,
+              coalesce(l.contact_role,'general') AS contact_role,
               coalesce(l.source_payload->>'lead_quality','B') AS lead_quality
             FROM outreach.messages m
             JOIN outreach.leads l ON l.id=m.lead_id
@@ -809,6 +823,11 @@ def queue_status():
             ORDER BY
               CASE WHEN m.status IN ('sending','approved','queued','pending_approval')
                 THEN 0 ELSE 1 END,
+              CASE coalesce(l.source_payload->>'lead_quality','B')
+                WHEN 'A' THEN 0 ELSE 1 END,
+              l.lead_score DESC NULLS LAST,
+              l.confidence_score DESC NULLS LAST,
+              CASE l.contact_role WHEN 'sales' THEN 0 WHEN 'general' THEN 1 ELSE 2 END,
               m.updated_at DESC,
               m.id DESC
             LIMIT 200

@@ -36,6 +36,7 @@ def process_one_result(
             JOIN outreach.campaigns c ON c.id=m.campaign_id
             WHERE m.status IN ('approved','queued')
               AND c.status='active'
+              AND l.contact_role NOT IN ('finance','accounting')
               AND (m.scheduled_at IS NULL OR m.scheduled_at <= now())
               AND (
                 (m.sequence_step=0 AND l.status='ready')
@@ -65,12 +66,13 @@ def process_one_result(
                               AND x.updated_at >= %s))) < %s
               AND (%s IS NULL OR m.campaign_id=%s)
             ORDER BY
-              m.scheduled_at NULLS FIRST,
               CASE coalesce(l.source_payload->>'lead_quality','B')
                 WHEN 'A' THEN 0 ELSE 1
               END,
               l.lead_score DESC NULLS LAST,
               l.confidence_score DESC NULLS LAST,
+              CASE l.contact_role WHEN 'sales' THEN 0 WHEN 'general' THEN 1 ELSE 2 END,
+              m.scheduled_at NULLS FIRST,
               m.id
             FOR UPDATE SKIP LOCKED LIMIT 1
             """,
@@ -174,16 +176,16 @@ def uncertain_delivery_count(conn) -> int:
     return row["total"]
 
 
-def queued_for_campaign(conn, campaign_id: int) -> int:
+def queued_for_campaign(conn, campaign_id: int | None) -> int:
     row = conn.execute(
         """
         SELECT count(*) AS total
         FROM outreach.messages
-        WHERE campaign_id=%s
+        WHERE (%s IS NULL OR campaign_id=%s)
           AND status IN ('approved','queued')
           AND (scheduled_at IS NULL OR scheduled_at <= now())
         """,
-        (campaign_id,),
+        (campaign_id, campaign_id),
     ).fetchone()
     return row["total"]
 
@@ -191,7 +193,7 @@ def queued_for_campaign(conn, campaign_id: int) -> int:
 def process_batch(
     conn,
     settings: Settings,
-    campaign_id: int,
+    campaign_id: int | None,
     limit: int,
     interval_seconds: int,
 ) -> dict[str, int]:

@@ -36,6 +36,9 @@ def test_email_normalization():
 def test_contact_roles():
     assert contact_role("vendas@empresa.com.br") == "sales"
     assert contact_role("fiscal@empresa.com.br") == "finance"
+    assert contact_role("canal.fiscal@empresa.com.br") == "finance"
+    assert contact_role("contasapagar@empresa.com.br") == "finance"
+    assert contact_role("pessoa@escritoriocontabil.com.br") == "finance"
 
 
 class SyncLeadsConnection:
@@ -321,6 +324,7 @@ class DryRunDatabase:
 
 
 def test_daily_dry_run_does_not_sync_or_prepare(monkeypatch):
+    monkeypatch.setattr(cli, "active_scheduled_campaigns", lambda conn: [])
     monkeypatch.setattr(
         cli,
         "sync_leads",
@@ -357,6 +361,20 @@ def test_daily_dry_run_does_not_sync_or_prepare(monkeypatch):
     assert result["processed"] == 0
     assert result["synced"] == 12
     assert db.connection.rolled_back
+
+
+def test_dispatch_prefers_active_user_campaigns(monkeypatch):
+    campaigns = [{"id": 17, "name": "Campanha selecionada"}]
+    monkeypatch.setattr(cli, "active_scheduled_campaigns", lambda conn: campaigns)
+    monkeypatch.setattr(
+        cli,
+        "ensure_campaign",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("não deve criar campanha automática")
+        ),
+    )
+
+    assert cli.campaigns_for_dispatch(object(), SimpleNamespace(), commit=True) == campaigns
 
 
 def test_daily_run_blocks_on_uncertain_delivery(monkeypatch):
