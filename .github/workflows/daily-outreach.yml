@@ -31,7 +31,6 @@ concurrency:
 
 jobs:
   send:
-    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_HOURLY_OUTREACH == 'true' || vars.ENABLE_DAILY_OUTREACH == 'true'
     name: Enviar melhores leads da hora
     runs-on: ubuntu-latest
     timeout-minutes: 75
