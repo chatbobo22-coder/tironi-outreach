@@ -253,11 +253,20 @@ def contacts(
     page_size: int = Query(default=25, ge=10, le=100),
     q: str = Query(default="", max_length=120),
 ):
-    search = f"%{q.strip()}%"
+    query_text = q.strip().lower()
+    search = f"%{query_text}%"
     offset = (page - 1) * page_size
+    search_expression = """
+      lower(
+        coalesce(l.trade_name,'') || ' ' || l.company_name || ' ' ||
+        coalesce(l.email,'') || ' ' || l.cnpj::text
+      ) ILIKE %s
+    """
+    search_clause = f"AND {search_expression}" if query_text else ""
+    row_params = (search, page_size, offset) if query_text else (page_size, offset)
     with db.connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
               l.id,
               coalesce(nullif(l.trade_name, ''), l.company_name) AS company,
@@ -268,8 +277,8 @@ def contacts(
               coalesce(l.lead_score, 0) AS score,
               coalesce(l.confidence_score, 0) AS confidence_score,
               coalesce(l.source_payload->>'lead_quality', 'B') AS lead_quality,
-              coalesce(nullif(l.source_payload #>> '{sinais,intelligence_profile,profile_score}', '')::numeric, 0) AS profile_score,
-              coalesce(nullif(l.source_payload #>> '{sinais,intelligence_profile,data_confidence_score}', '')::numeric, 0) AS data_confidence_score,
+              coalesce(nullif(l.source_payload #>> '{{sinais,intelligence_profile,profile_score}}', '')::numeric, 0) AS profile_score,
+              coalesce(nullif(l.source_payload #>> '{{sinais,intelligence_profile,data_confidence_score}}', '')::numeric, 0) AS data_confidence_score,
               coalesce(l.source_payload->'qualification_reasons', '[]'::jsonb) AS qualification_reasons,
               l.status,
               latest.subject AS last_subject,
@@ -288,36 +297,51 @@ def contacts(
               LIMIT 1
             ) latest ON true
             WHERE l.email IS NOT NULL
-              AND (coalesce(l.trade_name, '') ILIKE %s
-                OR l.company_name ILIKE %s OR l.email ILIKE %s OR l.cnpj ILIKE %s)
-            ORDER BY l.lead_score DESC NULLS LAST, l.id DESC
+              {search_clause}
+            ORDER BY l.id DESC
             LIMIT %s OFFSET %s
             """,
-            (search, search, search, search, page_size, offset),
+            row_params,
         ).fetchall()
-        totals = conn.execute(
-            """
-            SELECT
-              count(*) AS total,
-              count(*) FILTER (WHERE source_payload->>'lead_quality' = 'A') AS quality_a,
-              count(*) FILTER (WHERE source_payload->>'lead_quality' = 'B') AS quality_b,
-              count(*) FILTER (WHERE whatsapp IS NOT NULL AND whatsapp <> '') AS with_whatsapp,
-              count(*) FILTER (WHERE source_payload->'qualification_reasons' ? 'perfil_publico_verificado') AS public_profile,
-              round(avg(coalesce(lead_score, 0)), 1) AS average_score
-            FROM outreach.leads
-            WHERE email IS NOT NULL
-            """
-        ).fetchone()
-        filtered = conn.execute(
-            """
-            SELECT count(*) AS total
-            FROM outreach.leads l
-            WHERE l.email IS NOT NULL
-              AND (coalesce(l.trade_name, '') ILIKE %s
-                OR l.company_name ILIKE %s OR l.email ILIKE %s OR l.cnpj ILIKE %s)
-            """,
-            (search, search, search, search),
-        ).fetchone()["total"]
+        has_metrics = conn.execute(
+            "SELECT to_regclass('outreach.lead_metrics') IS NOT NULL AS available"
+        ).fetchone()["available"]
+        if has_metrics:
+            totals = conn.execute(
+                """
+                SELECT total,quality_a,quality_b,with_whatsapp,public_profile,
+                  CASE WHEN total>0 THEN round(score_sum::numeric/total,1) ELSE 0 END
+                    AS average_score
+                FROM outreach.lead_metrics WHERE singleton
+                """
+            ).fetchone()
+        else:
+            # Compatibilidade durante o deploy, antes da migration de métricas.
+            approximate = conn.execute(
+                """
+                SELECT greatest(reltuples,0)::bigint AS total
+                FROM pg_class
+                WHERE oid='outreach.leads'::regclass
+                """
+            ).fetchone()["total"]
+            totals = {
+                "total": approximate,
+                "quality_a": 0,
+                "quality_b": 0,
+                "with_whatsapp": 0,
+                "public_profile": 0,
+                "average_score": 0,
+            }
+        filtered = totals["total"]
+        if query_text:
+            filtered = conn.execute(
+                f"""
+                SELECT count(*) AS total
+                FROM outreach.leads l
+                WHERE l.email IS NOT NULL AND {search_expression}
+                """,
+                (search,),
+            ).fetchone()["total"]
     return {
         "contacts": rows,
         "metrics": totals,

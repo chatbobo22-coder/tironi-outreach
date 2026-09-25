@@ -1,6 +1,5 @@
 from datetime import datetime
 from email.utils import parseaddr
-import json
 from zoneinfo import ZoneInfo
 
 from .config import Settings
@@ -44,49 +43,80 @@ def sync_leads(conn, *, commit: bool = True) -> int:
     ).fetchone()
     if not relation["prospects"]:
         raise RuntimeError("Tabela de prospects qualificados do CNPJ ETL não encontrada")
-    query = """
-    SELECT cnpj, razao_social, nome_fantasia, email, telefone_1, whatsapp_url,
-           lead_score, confidence_score, to_jsonb(p) AS payload
-    FROM cnpj.prospectos_qualificados p
-    WHERE qualification_status = 'qualified'
-      AND lead_quality IN ('A', 'B')
-      AND email IS NOT NULL
-    """
-    count = 0
-    for row in conn.execute(query).fetchall():
-        email = normalize_email(row["email"])
-        if not email:
-            continue
-        domain = email.rsplit("@", 1)[1]
-        result = conn.execute(
-            """
-            INSERT INTO outreach.leads
-              (cnpj,company_name,trade_name,email,email_domain,phone,whatsapp,contact_role,
-               lead_score,confidence_score,source_payload,status,updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ready',now())
-            ON CONFLICT (cnpj) DO UPDATE SET
-              company_name=EXCLUDED.company_name, trade_name=EXCLUDED.trade_name,
-              email=EXCLUDED.email, email_domain=EXCLUDED.email_domain,
-              phone=EXCLUDED.phone, whatsapp=EXCLUDED.whatsapp,
-              contact_role=EXCLUDED.contact_role,
-              lead_score=EXCLUDED.lead_score, confidence_score=EXCLUDED.confidence_score,
-              source_payload=EXCLUDED.source_payload, updated_at=now()
-            """,
-            (
-                row["cnpj"],
-                row["razao_social"],
-                row["nome_fantasia"],
-                email,
-                domain,
-                row["telefone_1"],
-                row["whatsapp_url"],
-                contact_role(email),
-                row["lead_score"],
-                row["confidence_score"],
-                json.dumps(row["payload"], default=str),
-            ),
+    result = conn.execute(
+        r"""
+        INSERT INTO outreach.leads
+          (cnpj,company_name,trade_name,email,email_domain,phone,whatsapp,contact_role,
+           lead_score,confidence_score,source_payload,source,status,updated_at)
+        SELECT p.cnpj,p.razao_social,p.nome_fantasia,lower(btrim(p.email)),
+          split_part(lower(btrim(p.email)),'@',2),p.telefone_1,p.whatsapp_url,
+          CASE
+            WHEN split_part(lower(btrim(p.email)),'@',1)
+              IN ('vendas','comercial','sales') THEN 'sales'
+            WHEN split_part(lower(btrim(p.email)),'@',1)
+              IN ('contato','atendimento','relacionamento','sac') THEN 'support'
+            WHEN split_part(lower(btrim(p.email)),'@',1)
+              IN ('financeiro','fiscal','nfe','contabilidade') THEN 'finance'
+            ELSE 'general'
+          END,
+          p.lead_score,p.confidence_score,to_jsonb(p),'cnpj_etl','ready',now()
+        FROM cnpj.prospectos_qualificados p
+        WHERE p.qualification_status = 'qualified' AND p.lead_quality IN ('A', 'B')
+          AND p.email IS NOT NULL
+          AND btrim(p.email) ~* '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
+        ON CONFLICT (cnpj) DO UPDATE SET
+          company_name=EXCLUDED.company_name,trade_name=EXCLUDED.trade_name,
+          email=EXCLUDED.email,email_domain=EXCLUDED.email_domain,
+          phone=EXCLUDED.phone,whatsapp=EXCLUDED.whatsapp,
+          contact_role=EXCLUDED.contact_role,lead_score=EXCLUDED.lead_score,
+          confidence_score=EXCLUDED.confidence_score,
+          source_payload=EXCLUDED.source_payload,source=EXCLUDED.source,updated_at=now()
+        WHERE (
+          outreach.leads.company_name,outreach.leads.trade_name,outreach.leads.email,
+          outreach.leads.phone,outreach.leads.whatsapp,outreach.leads.contact_role,
+          outreach.leads.lead_score,outreach.leads.confidence_score,
+          outreach.leads.source_payload
+        ) IS DISTINCT FROM (
+          EXCLUDED.company_name,EXCLUDED.trade_name,EXCLUDED.email,EXCLUDED.phone,
+          EXCLUDED.whatsapp,EXCLUDED.contact_role,EXCLUDED.lead_score,
+          EXCLUDED.confidence_score,EXCLUDED.source_payload
         )
-        count += result.rowcount
+        """
+    )
+    count = result.rowcount
+    metrics_available = conn.execute(
+        "SELECT to_regclass('outreach.lead_metrics') IS NOT NULL AS available"
+    ).fetchone()["available"]
+    if metrics_available:
+        conn.execute(
+            """
+            INSERT INTO outreach.lead_metrics
+              (singleton,total,quality_a,quality_b,with_whatsapp,public_profile,
+               score_sum,updated_at)
+            SELECT true,count(*) FILTER (WHERE email IS NOT NULL),
+              count(*) FILTER (
+                WHERE email IS NOT NULL AND source_payload->>'lead_quality'='A'
+              ),
+              count(*) FILTER (
+                WHERE email IS NOT NULL AND source_payload->>'lead_quality'='B'
+              ),
+              count(*) FILTER (
+                WHERE email IS NOT NULL AND NULLIF(whatsapp,'') IS NOT NULL
+              ),
+              count(*) FILTER (
+                WHERE email IS NOT NULL
+                  AND source_payload->'qualification_reasons'
+                    ? 'perfil_publico_verificado'
+              ),
+              COALESCE(sum(COALESCE(lead_score,0)) FILTER (WHERE email IS NOT NULL),0),now()
+            FROM outreach.leads
+            ON CONFLICT (singleton) DO UPDATE SET
+              total=EXCLUDED.total,quality_a=EXCLUDED.quality_a,
+              quality_b=EXCLUDED.quality_b,with_whatsapp=EXCLUDED.with_whatsapp,
+              public_profile=EXCLUDED.public_profile,score_sum=EXCLUDED.score_sum,
+              updated_at=now()
+            """
+        )
     if commit:
         conn.commit()
     return count

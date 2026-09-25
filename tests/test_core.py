@@ -40,25 +40,11 @@ class SyncLeadsConnection:
     def execute(self, query, params=None):
         if "to_regclass('cnpj.prospectos_qualificados')" in query:
             return FakeResult(row={"prospects": "cnpj.prospectos_qualificados"})
-        if "FROM cnpj.prospectos_qualificados" in query:
-            self.source_query = query
-            return FakeResult(
-                rows=[
-                    {
-                        "cnpj": "12345678000190",
-                        "razao_social": "Empresa Ltda",
-                        "nome_fantasia": "Empresa",
-                        "email": "Contato@Empresa.com.br",
-                        "telefone_1": "11999999999",
-                        "whatsapp_url": "https://wa.me/5511999999999",
-                        "lead_score": 85,
-                        "confidence_score": 90,
-                        "payload": {"lead_quality": "A"},
-                    }
-                ]
-            )
         if "INSERT INTO outreach.leads" in query:
+            self.source_query = query
             return FakeResult(rowcount=1)
+        if "to_regclass('outreach.lead_metrics')" in query:
+            return FakeResult(row={"available": False})
         raise AssertionError(query)
 
     def commit(self):
