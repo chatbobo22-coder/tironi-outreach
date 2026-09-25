@@ -1,0 +1,91 @@
+name: Aplicar migrations do Outreach
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sql/**"
+      - ".github/workflows/database-migrations.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tironi-outreach-database-migrations
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET || secrets.UNSUBSCRIBE_SECRET }}
+
+    steps:
+      - name: Baixar o projeto
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar o projeto
+        run: python -m pip install .
+
+      - name: Guardar segredo do agendador no Vault
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+
+          secret = os.environ.get("CRON_SECRET", "")
+          if not secret:
+              raise RuntimeError("CRON_SECRET ou UNSUBSCRIBE_SECRET não configurado")
+
+          with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+              with conn.cursor() as cur:
+                  cur.execute("CREATE EXTENSION IF NOT EXISTS supabase_vault")
+                  cur.execute(
+                      "SELECT id FROM vault.secrets WHERE name = %s",
+                      ("outreach_cron_secret",),
+                  )
+                  row = cur.fetchone()
+                  if row:
+                      cur.execute(
+                          "SELECT vault.update_secret(%s, %s, %s)",
+                          (row[0], secret, "outreach_cron_secret"),
+                      )
+                  else:
+                      cur.execute(
+                          "SELECT vault.create_secret(%s, %s)",
+                          (secret, "outreach_cron_secret"),
+                      )
+          print("Segredo do agendador armazenado no Vault.")
+          PY
+
+      - name: Aplicar migrations
+        run: outreach migrate
+
+      - name: Confirmar agendamento
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+
+          with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+              with conn.cursor() as cur:
+                  cur.execute(
+                      "SELECT jobname, schedule, active FROM cron.job "
+                      "WHERE jobname IN (%s, %s) ORDER BY jobname",
+                      ("tironi-outreach-hourly-dispatch", "tironi-outreach-cron-history-cleanup"),
+                  )
+                  rows = cur.fetchall()
+          if len(rows) != 2 or not all(row[2] for row in rows):
+              raise RuntimeError(f"Agendamentos ausentes ou inativos: {rows}")
+          for jobname, schedule, active in rows:
+              print(f"{jobname}: {schedule} | ativo={active}")
+          PY

@@ -27,7 +27,7 @@ from .service import (
     render,
     sync_leads,
 )
-from .worker import process_one_result
+from .worker import process_batch, process_one_result
 
 app = FastAPI(title="Tironi Outreach", version="1.0.0")
 settings = Settings()
@@ -411,6 +411,37 @@ def send_next_campaign_message(campaign_id: int):
     with db.connect() as conn:
         status = process_one_result(conn, settings, campaign_id)
     return {"processed": status is not None, "status": status}
+
+
+@app.post("/api/campaigns/{campaign_id}/send-batch", dependencies=[Depends(auth)])
+def send_campaign_batch(
+    campaign_id: int,
+    limit: int = Query(default=50, ge=1, le=50),
+):
+    """Envia o saldo disponível da hora sem depender da aba do navegador."""
+    if settings.dry_run:
+        raise HTTPException(409, "Envio real bloqueado enquanto DRY_RUN estiver ativo")
+    try:
+        settings.validate_smtp()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    with db.connect() as conn:
+        return process_batch(conn, settings, campaign_id, limit, 0)
+
+
+@app.post("/api/dispatch/hourly")
+def dispatch_hourly(x_cron_secret: str | None = Header(default=None)):
+    """Ponto privado chamado pelo Supabase Cron; a cota é validada no banco."""
+    if not settings.cron_secret or x_cron_secret != settings.cron_secret:
+        raise HTTPException(401, "Cron não autorizado")
+    if settings.dry_run:
+        raise HTTPException(409, "Envio automático bloqueado enquanto DRY_RUN estiver ativo")
+    try:
+        settings.validate_smtp()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    with db.connect() as conn:
+        return process_batch(conn, settings, None, settings.hourly_limit, 0)
 
 
 @app.post("/api/campaigns/{campaign_id}/approve", dependencies=[Depends(auth)])
