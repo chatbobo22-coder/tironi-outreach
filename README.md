@@ -20,6 +20,10 @@ O perfil SMTP precisa estar aprovado e o remetente validado na SendPulse. Config
 - Cabeçalhos de descadastro em um clique e `Precedence: bulk`.
 - Modo seguro `DRY_RUN`.
 - Link assinado de descadastro e lista permanente de supressão.
+- Webhook SendPulse normalizado para bounce, spam e descadastro, com supressão imediata.
+- Pausa preventiva automática em 5% de bounce ou 0,2% de denúncias após amostra mínima.
+- Seleção A-primeiro por score e confiança, mantendo somente 400 mensagens na fila.
+- Oito janelas úteis de até 50 envios/hora, com 72 segundos entre mensagens.
 - API FastAPI e dashboard agregado em JSON.
 - Estrutura preparada para adaptadores futuros.
 - Modelos narrativos são carregados de forma idempotente na primeira consulta à
@@ -82,12 +86,13 @@ DRY_RUN=false
 
 O worker envia apenas no horário configurado e respeita todos os limites.
 
-## Envio diário pelo GitHub Actions
+## Envio horário pelo GitHub Actions
 
-O workflow `Envio diário da campanha` conecta ao PostgreSQL definido em
-`DATABASE_URL`, sincroniza a base, prepara a campanha e processa até 30 mensagens,
-com espaçamento de seis minutos para iniciar o aquecimento de forma conservadora.
-Ele roda diariamente às 09:00 no horário de São Paulo.
+O workflow `Envio horário dos melhores leads` conecta ao PostgreSQL definido em
+`DATABASE_URL`, sincroniza a base, mantém uma fila curta ordenada por qualidade A,
+score e confiança e processa até 50 mensagens por hora, espaçadas em 72 segundos.
+Ele roda de segunda a sexta, em oito janelas entre 09:00 e 17:00 no horário de São
+Paulo, respeitando o teto gratuito de 400 mensagens por dia.
 
 Antes de habilitar o envio real:
 
@@ -96,8 +101,9 @@ Antes de habilitar o envio real:
 2. Configure a variável `PUBLIC_BASE_URL` com a URL HTTPS da API.
 3. Execute manualmente com `dry_run=true` e limite `1`.
 4. Revise o resumo da execução antes de usar `dry_run=false`.
-5. Depois da validação, configure `ENABLE_DAILY_OUTREACH=true` nas variables do
-   GitHub Actions para liberar o agendamento.
+5. Depois da validação, configure `ENABLE_HOURLY_OUTREACH=true` nas variables do
+   GitHub Actions para liberar o agendamento. A variável antiga
+   `ENABLE_DAILY_OUTREACH=true` continua aceita por compatibilidade.
 
 Cada lead recebe no máximo um envio inicial e um follow-up após sete dias. Leads
 marcados como `replied` ou presentes em `outreach.suppressions` não recebem o
@@ -136,7 +142,12 @@ WhatsApp, Instagram, Facebook e LinkedIn não estão ativos nesta versão. Eles 
 4. Comece o DMARC com `p=none`, acompanhe os relatórios e só depois avance a política.
 5. Use um CNAME de rastreamento no próprio domínio, se o rastreamento estiver ativo.
 6. Aqueça o domínio gradualmente e envie apenas para contatos pertinentes e válidos.
-7. Monitore bounce, denúncia, descadastro e resposta; suprima imediatamente endereços ruins.
+7. Cadastre o webhook SMTP para
+   `https://tironi-outreach.vercel.app/api/webhooks/sendpulse?secret=SEU_SEGREDO`,
+   marcando entrega, falha, hard/soft bounce, spam e descadastro. Use no endereço o mesmo
+   valor secreto configurado em `SENDPULSE_WEBHOOK_SECRET`.
+8. Monitore bounce, denúncia, descadastro e resposta; o webhook pausa campanhas ativas
+   preventivamente em 5% de bounce ou 0,2% de denúncias, antes dos limites da SendPulse.
 
 Para a porta `587`, use `SMTP_STARTTLS=true` e `SMTP_SSL=false`. Para a porta `465`, use o inverso. Os valores exibidos na sua conta SendPulse prevalecem sobre os exemplos do projeto.
 

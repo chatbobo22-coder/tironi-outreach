@@ -11,6 +11,12 @@ from outreach.campaign import (
 )
 from outreach.providers.base import OutboundEmail
 from outreach.providers.smtp import build_message
+from outreach.reputation import (
+    ReputationSnapshot,
+    normalize_sendpulse_event,
+    permanent_suppression_reason,
+    reputation_pause_reasons,
+)
 from outreach.security import unsubscribe_token, valid_unsubscribe_token
 from outreach.service import (
     contact_role,
@@ -105,6 +111,41 @@ def test_unsubscribe_signature():
     assert not valid_unsubscribe_token(43, "a@b.com", token, "secret")
 
 
+def test_sendpulse_event_names_are_normalized_and_suppressed_safely():
+    assert normalize_sendpulse_event("hard_bounces") == "hard_bounce"
+    assert normalize_sendpulse_event("soft_bounces") == "soft_bounce"
+    assert normalize_sendpulse_event("spam_by_user") == "spam"
+    assert normalize_sendpulse_event("unsubscribed") == "unsubscribed"
+    assert permanent_suppression_reason("hard_bounce") == "invalid_address"
+    assert permanent_suppression_reason("soft_bounce") is None
+    assert permanent_suppression_reason("spam") == "spam_complaint"
+
+
+def test_reputation_limits_pause_before_sendpulse_limits():
+    snapshot = ReputationSnapshot(
+        sent_15m=100,
+        bounced_15m=5,
+        sent_24h=500,
+        complaints_24h=1,
+    )
+    assert reputation_pause_reasons(
+        snapshot,
+        minimum_sample=20,
+        max_bounce_rate_percent=5,
+        max_complaint_rate_percent=0.2,
+    ) == ["bounce_rate", "complaint_rate"]
+
+
+def test_reputation_limits_ignore_tiny_samples():
+    snapshot = ReputationSnapshot(1, 1, 1, 1)
+    assert not reputation_pause_reasons(
+        snapshot,
+        minimum_sample=20,
+        max_bounce_rate_percent=5,
+        max_complaint_rate_percent=0.2,
+    )
+
+
 class FakeResult:
     def __init__(self, *, row=None, rows=None, rowcount=0):
         self.row = row
@@ -121,6 +162,7 @@ class FakeResult:
 class PrepareCampaignConnection:
     def __init__(self):
         self.insert_count = 0
+        self.selection_query = ""
 
     def execute(self, query, params=None):
         if "SELECT * FROM outreach.campaigns" in query:
@@ -145,6 +187,7 @@ class PrepareCampaignConnection:
                 ]
             )
         if "INSERT INTO outreach.messages" in query:
+            self.selection_query = query
             self.insert_count += 1
             return FakeResult(rowcount=1 if self.insert_count == 1 else 0)
         raise AssertionError(query)
@@ -159,6 +202,9 @@ def test_prepare_campaign_counts_only_new_messages():
 
     assert prepare_campaign(conn, 7, settings) == 1
     assert prepare_campaign(conn, 7, settings) == 0
+    assert "WHEN 'A' THEN 0" in conn.selection_query
+    assert "l.lead_score DESC NULLS LAST" in conn.selection_query
+    assert "PREPARED_QUEUE_TARGET" not in conn.selection_query
 
 
 class PrepareFollowupConnection:

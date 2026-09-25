@@ -11,6 +11,12 @@ from .config import Settings
 from .db import Database
 from .providers.base import OutboundEmail
 from .providers.smtp import SmtpProvider
+from .reputation import (
+    ReputationSnapshot,
+    normalize_sendpulse_event,
+    permanent_suppression_reason,
+    reputation_pause_reasons,
+)
 from .security import valid_unsubscribe_token
 from .service import (
     audience_count,
@@ -39,11 +45,9 @@ class CampaignIn(BaseModel):
     body_template: str = Field(min_length=10, max_length=10000)
     body_html_template: str | None = Field(default=None, max_length=100000)
     template_id: int | None = None
-    daily_limit: int = Field(default=30, ge=1, le=1000)
+    daily_limit: int = Field(default=400, ge=1, le=1000)
     audience_mode: Literal["all", "quality", "score"] = "all"
-    audience_qualities: list[Literal["A", "B"]] = Field(
-        default_factory=lambda: ["A", "B"]
-    )
+    audience_qualities: list[Literal["A", "B"]] = Field(default_factory=lambda: ["A", "B"])
     min_score: int | None = Field(default=None, ge=0, le=100)
     max_score: int | None = Field(default=None, ge=0, le=100)
     scheduled_at: datetime | None = None
@@ -63,9 +67,7 @@ class DeliveryResolutionIn(BaseModel):
 
 class AudienceEstimateIn(BaseModel):
     audience_mode: Literal["all", "quality", "score"] = "all"
-    audience_qualities: list[Literal["A", "B"]] = Field(
-        default_factory=lambda: ["A", "B"]
-    )
+    audience_qualities: list[Literal["A", "B"]] = Field(default_factory=lambda: ["A", "B"])
     min_score: int | None = Field(default=None, ge=0, le=100)
     max_score: int | None = Field(default=None, ge=0, le=100)
 
@@ -555,9 +557,7 @@ def crm_cases(q: str = Query(default="", max_length=120)):
 @app.post("/api/crm", dependencies=[Depends(auth)], status_code=201)
 def create_crm_case(data: CrmCaseIn):
     with db.connect() as conn:
-        lead = conn.execute(
-            "SELECT id FROM outreach.leads WHERE id=%s", (data.lead_id,)
-        ).fetchone()
+        lead = conn.execute("SELECT id FROM outreach.leads WHERE id=%s", (data.lead_id,)).fetchone()
         if not lead:
             raise HTTPException(404, "Lead não encontrado")
         row = conn.execute(
@@ -881,36 +881,30 @@ def operational_settings():
 
 @app.post("/api/webhooks/sendpulse")
 def sendpulse_webhook(events: list[dict], secret: str | None = None):
-    if settings.sendpulse_webhook_secret and secret != settings.sendpulse_webhook_secret:
+    if not settings.sendpulse_webhook_secret:
+        raise HTTPException(503, "Webhook SendPulse não configurado")
+    if secret != settings.sendpulse_webhook_secret:
         raise HTTPException(401, "Assinatura inválida")
 
     accepted = 0
+    suppressed = 0
+    safety_pause: dict | None = None
     with db.connect() as conn:
         for event in events:
-            event_type = str(event.get("event", "")).lower()
-            if event_type not in {
-                "delivered",
-                "undelivered",
-                "bounce",
-                "hard_bounce",
-                "soft_bounce",
-                "open",
-                "opened",
-                "click",
-                "clicked",
-            }:
+            event_type = normalize_sendpulse_event(event.get("event"))
+            if not event_type:
                 continue
             recipient = str(event.get("recipient") or event.get("email") or "")
             provider_message_id = str(event.get("message_id") or event.get("task_id") or "")
             message = None
             if provider_message_id:
                 message = conn.execute(
-                    "SELECT id FROM outreach.messages WHERE provider_message_id=%s ORDER BY id DESC LIMIT 1",
+                    "SELECT id,lead_id FROM outreach.messages WHERE provider_message_id=%s ORDER BY id DESC LIMIT 1",
                     (provider_message_id,),
                 ).fetchone()
             if not message and recipient:
                 message = conn.execute(
-                    "SELECT id FROM outreach.messages WHERE destination=%s ORDER BY created_at DESC LIMIT 1",
+                    "SELECT id,lead_id FROM outreach.messages WHERE lower(destination)=lower(%s) ORDER BY created_at DESC LIMIT 1",
                     (recipient,),
                 ).fetchone()
             if not message:
@@ -947,18 +941,90 @@ def sendpulse_webhook(events: list[dict], secret: str | None = None):
                     "UPDATE outreach.messages SET status='delivered',delivered_at=now(),updated_at=now() WHERE id=%s",
                     (message["id"],),
                 )
-            elif event_type in {
-                "undelivered",
-                "bounce",
-                "hard_bounce",
-                "soft_bounce",
-            }:
+            elif event_type in {"undelivered", "bounce", "hard_bounce", "soft_bounce"}:
                 conn.execute(
                     "UPDATE outreach.messages SET status='bounced',updated_at=now() WHERE id=%s",
                     (message["id"],),
                 )
+            elif event_type == "spam":
+                conn.execute(
+                    "UPDATE outreach.messages SET status='blocked',updated_at=now() WHERE id=%s",
+                    (message["id"],),
+                )
+            elif event_type == "unsubscribed":
+                conn.execute(
+                    "UPDATE outreach.messages SET status='unsubscribed',updated_at=now() WHERE id=%s",
+                    (message["id"],),
+                )
+
+            suppression_reason = permanent_suppression_reason(event_type)
+            if suppression_reason and recipient:
+                conn.execute(
+                    """
+                    INSERT INTO outreach.suppressions
+                      (channel,destination,reason,source,permanent)
+                    VALUES ('email',lower(%s),%s,'sendpulse_webhook',true)
+                    ON CONFLICT (channel,destination) DO UPDATE SET
+                      reason=EXCLUDED.reason,source=EXCLUDED.source,permanent=true
+                    """,
+                    (recipient, suppression_reason),
+                )
+                conn.execute(
+                    "UPDATE outreach.leads SET status='blocked',updated_at=now() WHERE id=%s",
+                    (message["lead_id"],),
+                )
+                suppressed += 1
+
+        row = conn.execute(
+            """
+            SELECT
+              count(DISTINCT m.id) FILTER (
+                WHERE sent_at >= now() - interval '15 minutes'
+              ) AS sent_15m,
+              count(DISTINCT e.message_id) FILTER (
+                WHERE e.occurred_at >= now() - interval '15 minutes'
+                  AND e.event_type IN ('undelivered','bounce','hard_bounce','soft_bounce')
+              ) AS bounced_15m,
+              count(DISTINCT m.id) FILTER (
+                WHERE sent_at >= now() - interval '24 hours'
+              ) AS sent_24h,
+              count(DISTINCT e.message_id) FILTER (
+                WHERE e.occurred_at >= now() - interval '24 hours'
+                  AND e.event_type='spam'
+              ) AS complaints_24h
+            FROM outreach.messages m
+            LEFT JOIN outreach.events e ON e.message_id=m.id
+            """
+        ).fetchone()
+        snapshot = ReputationSnapshot(
+            sent_15m=int(row["sent_15m"] or 0),
+            bounced_15m=int(row["bounced_15m"] or 0),
+            sent_24h=int(row["sent_24h"] or 0),
+            complaints_24h=int(row["complaints_24h"] or 0),
+        )
+        pause_reasons = reputation_pause_reasons(
+            snapshot,
+            minimum_sample=settings.reputation_min_sample,
+            max_bounce_rate_percent=settings.max_bounce_rate_percent,
+            max_complaint_rate_percent=settings.max_complaint_rate_percent,
+        )
+        if pause_reasons:
+            paused = conn.execute(
+                "UPDATE outreach.campaigns SET status='paused',updated_at=now() WHERE status='active'"
+            ).rowcount
+            safety_pause = {
+                "reasons": pause_reasons,
+                "campaigns_paused": paused,
+                "bounce_rate_percent": round(snapshot.bounce_rate_percent, 3),
+                "complaint_rate_percent": round(snapshot.complaint_rate_percent, 3),
+            }
         conn.commit()
-    return {"received": len(events), "accepted": accepted}
+    return {
+        "received": len(events),
+        "accepted": accepted,
+        "suppressed": suppressed,
+        "safety_pause": safety_pause,
+    }
 
 
 @app.post("/api/messages/{message_id}/reply", dependencies=[Depends(auth)])
@@ -1056,6 +1122,13 @@ def unsubscribe(message_id: int, token: str):
         )
         conn.execute(
             "UPDATE outreach.messages SET status='unsubscribed',updated_at=now() WHERE id=%s",
+            (message_id,),
+        )
+        conn.execute(
+            """
+            UPDATE outreach.leads SET status='blocked',updated_at=now()
+            WHERE id=(SELECT lead_id FROM outreach.messages WHERE id=%s)
+            """,
             (message_id,),
         )
         conn.commit()

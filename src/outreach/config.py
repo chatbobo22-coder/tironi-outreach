@@ -29,8 +29,8 @@ class Settings:
     api_key: str = os.getenv("API_KEY", "")
     sendpulse_webhook_secret: str = os.getenv("SENDPULSE_WEBHOOK_SECRET", "")
     require_approval: bool = flag("REQUIRE_MANUAL_APPROVAL", "true")
-    daily_limit: int = int(os.getenv("DAILY_EMAIL_LIMIT", "30"))
-    hourly_limit: int = int(os.getenv("HOURLY_EMAIL_LIMIT", "8"))
+    daily_limit: int = int(os.getenv("DAILY_EMAIL_LIMIT", "400"))
+    hourly_limit: int = int(os.getenv("HOURLY_EMAIL_LIMIT", "50"))
     domain_daily_limit: int = int(os.getenv("MAX_PER_DOMAIN_PER_DAY", "2"))
     send_start_hour: int = int(os.getenv("SEND_START_HOUR", "9"))
     send_end_hour: int = int(os.getenv("SEND_END_HOUR", "17"))
@@ -38,7 +38,11 @@ class Settings:
     poll_seconds: int = int(os.getenv("WORKER_POLL_SECONDS", "15"))
     max_followups: int = int(os.getenv("MAX_FOLLOW_UPS", "1"))
     followup_delay_days: int = int(os.getenv("FOLLOW_UP_DELAY_DAYS", "7"))
-    send_interval_seconds: int = int(os.getenv("SEND_INTERVAL_SECONDS", "30"))
+    send_interval_seconds: int = int(os.getenv("SEND_INTERVAL_SECONDS", "72"))
+    prepared_queue_target: int = int(os.getenv("PREPARED_QUEUE_TARGET", "400"))
+    reputation_min_sample: int = int(os.getenv("REPUTATION_MIN_SAMPLE", "20"))
+    max_bounce_rate_percent: float = float(os.getenv("MAX_BOUNCE_RATE_PERCENT", "5"))
+    max_complaint_rate_percent: float = float(os.getenv("MAX_COMPLAINT_RATE_PERCENT", "0.2"))
     dry_run: bool = flag("DRY_RUN", "true")
 
     def validate_smtp(self) -> None:

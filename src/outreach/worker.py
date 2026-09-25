@@ -64,7 +64,14 @@ def process_one_result(
                           OR (x.status IN ('sending','delivery_uncertain')
                               AND x.updated_at >= %s))) < %s
               AND (%s IS NULL OR m.campaign_id=%s)
-            ORDER BY m.scheduled_at NULLS FIRST, m.id
+            ORDER BY
+              m.scheduled_at NULLS FIRST,
+              CASE coalesce(l.source_payload->>'lead_quality','B')
+                WHEN 'A' THEN 0 ELSE 1
+              END,
+              l.lead_score DESC NULLS LAST,
+              l.confidence_score DESC NULLS LAST,
+              m.id
             FOR UPDATE SKIP LOCKED LIMIT 1
             """,
             (

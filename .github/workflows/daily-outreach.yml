@@ -1,8 +1,9 @@
-name: Envio diário da campanha
+name: Envio horário dos melhores leads
 
 on:
   schedule:
-    - cron: "0 12 * * *"
+    # 09h–16h em São Paulo: 8 janelas de 50 = teto gratuito de 400/dia.
+    - cron: "0 12-19 * * 1-5"
   workflow_dispatch:
     inputs:
       limit:
@@ -25,28 +26,29 @@ permissions:
   contents: read
 
 concurrency:
-  group: tironi-outreach-daily
+  group: tironi-outreach-hourly
   cancel-in-progress: false
 
 jobs:
   send:
-    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_DAILY_OUTREACH == 'true'
-    name: Processar campanha diária
+    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_HOURLY_OUTREACH == 'true' || vars.ENABLE_DAILY_OUTREACH == 'true'
+    name: Enviar melhores leads da hora
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 75
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
-      RUN_LIMIT: ${{ github.event_name == 'schedule' && '30' || inputs.limit }}
-      SEND_INTERVAL_SECONDS: ${{ github.event_name == 'schedule' && '360' || inputs.interval_seconds }}
+      RUN_LIMIT: ${{ github.event_name == 'schedule' && '50' || inputs.limit }}
+      SEND_INTERVAL_SECONDS: ${{ github.event_name == 'schedule' && '72' || inputs.interval_seconds }}
       REQUIRE_MANUAL_APPROVAL: "false"
-      DAILY_EMAIL_LIMIT: "30"
-      HOURLY_EMAIL_LIMIT: "10"
+      DAILY_EMAIL_LIMIT: "400"
+      HOURLY_EMAIL_LIMIT: "50"
+      PREPARED_QUEUE_TARGET: "400"
       MAX_PER_DOMAIN_PER_DAY: "2"
       MAX_FOLLOW_UPS: "1"
       FOLLOW_UP_DELAY_DAYS: "7"
-      SEND_START_HOUR: "8"
-      SEND_END_HOUR: "18"
+      SEND_START_HOUR: "9"
+      SEND_END_HOUR: "17"
       APP_TIMEZONE: America/Sao_Paulo
       EMAIL_PROVIDER: sendpulse_smtp
       SMTP_HOST: smtp-pulse.com
@@ -112,7 +114,7 @@ jobs:
 
           result_path = Path("daily-result.json")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              summary.write("## Campanha diária Tironi Tech\n")
+              summary.write("## Janela horária Tironi Tech\n")
               if not result_path.exists():
                   summary.write("A execução terminou antes de gerar o resultado.\n")
               else:

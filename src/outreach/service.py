@@ -41,11 +41,7 @@ def ensure_story_templates(conn) -> int:
     if existing == len(STORY_TEMPLATE_NAMES):
         return 0
 
-    migration = (
-        Path(__file__).resolve().parents[2]
-        / "sql"
-        / "007_story_email_templates.sql"
-    )
+    migration = Path(__file__).resolve().parents[2] / "sql" / "007_story_email_templates.sql"
     conn.execute(migration.read_text(encoding="utf-8"))
     return len(STORY_TEMPLATE_NAMES) - existing
 
@@ -76,9 +72,7 @@ def ensure_dispatch_schema(conn) -> bool:
     if available:
         return False
 
-    migration = (
-        Path(__file__).resolve().parents[2] / "sql" / "008_campaign_audiences.sql"
-    )
+    migration = Path(__file__).resolve().parents[2] / "sql" / "008_campaign_audiences.sql"
     conn.execute(migration.read_text(encoding="utf-8"))
     return True
 
@@ -327,6 +321,7 @@ def prepare_campaign(
     if not campaign or campaign["channel"] != "email":
         raise ValueError("Campanha de e-mail não encontrada")
     clause, audience_params = audience_filter(campaign)
+    queue_target = max(1, int(getattr(settings, "prepared_queue_target", 400)))
     initial_status = "pending_approval" if settings.require_approval else "queued"
     company_sql = "coalesce(nullif(l.trade_name,''),l.company_name,'sua empresa')"
     reason_sql = "coalesce(l.company_name,'')"
@@ -337,6 +332,43 @@ def prepare_campaign(
     )
     result = conn.execute(
         f"""
+        WITH queue_capacity AS (
+          SELECT greatest(
+            %s - count(*) FILTER (
+              WHERE status IN ('pending_approval','approved','queued','sending',
+                               'delivery_uncertain')
+            ),
+            0
+          )::integer AS available
+          FROM outreach.messages
+          WHERE campaign_id=%s AND sequence_step=0
+        ), ranked_leads AS (
+          SELECT l.*
+          FROM outreach.leads l
+          WHERE l.status='ready' AND l.email IS NOT NULL
+            AND l.contact_role NOT IN ('finance','accounting')
+            AND NOT EXISTS (
+              SELECT 1 FROM outreach.suppressions s
+              WHERE s.channel='email' AND lower(s.destination)=lower(l.email)
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM outreach.messages previous
+              WHERE previous.campaign_id=%s
+                AND previous.lead_id=l.id
+                AND previous.channel='email'
+                AND previous.sequence_step=0
+            )
+            {clause}
+          ORDER BY
+            CASE coalesce(l.source_payload->>'lead_quality','B')
+              WHEN 'A' THEN 0 ELSE 1
+            END,
+            l.lead_score DESC NULLS LAST,
+            l.confidence_score DESC NULLS LAST,
+            CASE l.contact_role WHEN 'sales' THEN 0 WHEN 'general' THEN 1 ELSE 2 END,
+            l.id
+          LIMIT (SELECT available FROM queue_capacity)
+        )
         INSERT INTO outreach.messages
           (campaign_id,lead_id,channel,destination,destination_domain,subject,
            body_text,body_html,status,scheduled_at,sequence_step)
@@ -345,24 +377,25 @@ def prepare_campaign(
           {render_sql},
           {render_sql},
           %s,coalesce(%s,now()),0
-        FROM outreach.leads l
-        WHERE l.status='ready' AND l.email IS NOT NULL
-          AND l.contact_role NOT IN ('finance','accounting')
-          AND NOT EXISTS (
-            SELECT 1 FROM outreach.suppressions s
-            WHERE s.channel='email' AND lower(s.destination)=lower(l.email)
-          )
-          {clause}
+        FROM ranked_leads l
+        ORDER BY
+          CASE coalesce(l.source_payload->>'lead_quality','B') WHEN 'A' THEN 0 ELSE 1 END,
+          l.lead_score DESC NULLS LAST,
+          l.confidence_score DESC NULLS LAST,
+          l.id
         ON CONFLICT (campaign_id,lead_id,channel,sequence_step) DO NOTHING
         """,
         (
+            queue_target,
+            campaign_id,
+            campaign_id,
+            *audience_params,
             campaign_id,
             campaign["subject_template"] or "Contato Tironi Tech",
             campaign["body_template"],
             campaign.get("body_html_template"),
             initial_status,
             campaign.get("scheduled_start_at"),
-            *audience_params,
         ),
     )
     count = result.rowcount
