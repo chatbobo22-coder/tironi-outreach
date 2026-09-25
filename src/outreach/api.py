@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from .config import Settings
 from .db import Database
 from .security import valid_unsubscribe_token
-from .service import prepare_campaign, sync_leads
+from .service import ensure_story_templates, prepare_campaign, sync_leads
 
 app = FastAPI(title="Tironi Outreach", version="1.0.0")
 settings = Settings()
@@ -130,6 +130,7 @@ def create_campaign(data: CampaignIn):
 @app.get("/api/templates", dependencies=[Depends(auth)])
 def list_templates():
     with db.connect() as conn:
+        ensure_story_templates(conn)
         return {
             "templates": conn.execute(
                 """

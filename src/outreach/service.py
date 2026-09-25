@@ -1,8 +1,52 @@
 from datetime import datetime
 from email.utils import parseaddr
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import Settings
+
+
+STORY_TEMPLATE_NAMES = (
+    "História 01 - Quando tudo depende de você",
+    "História 02 - O oi das 23h47",
+    "História 03 - O monstro da planilha",
+    "História 04 - A bola pediu mais dados",
+    "História 05 - A ferramenta que quase cabia",
+    "História 06 - A aposentadoria do copiar e colar",
+)
+STORY_TEMPLATE_SEED_LOCK = 843_176_620_007
+
+
+def ensure_story_templates(conn) -> int:
+    placeholders = ",".join(["%s"] * len(STORY_TEMPLATE_NAMES))
+
+    def active_count() -> int:
+        row = conn.execute(
+            f"""
+            SELECT count(DISTINCT name) AS total
+            FROM outreach.templates
+            WHERE status='active' AND name IN ({placeholders})
+            """,
+            STORY_TEMPLATE_NAMES,
+        ).fetchone()
+        return int(row["total"])
+
+    existing = active_count()
+    if existing == len(STORY_TEMPLATE_NAMES):
+        return 0
+
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (STORY_TEMPLATE_SEED_LOCK,))
+    existing = active_count()
+    if existing == len(STORY_TEMPLATE_NAMES):
+        return 0
+
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "sql"
+        / "007_story_email_templates.sql"
+    )
+    conn.execute(migration.read_text(encoding="utf-8"))
+    return len(STORY_TEMPLATE_NAMES) - existing
 
 
 def normalize_email(value: str | None) -> str | None:

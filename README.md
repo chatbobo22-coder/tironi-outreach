@@ -22,6 +22,8 @@ O perfil SMTP precisa estar aprovado e o remetente validado na SendPulse. Config
 - Link assinado de descadastro e lista permanente de supressão.
 - API FastAPI e dashboard agregado em JSON.
 - Estrutura preparada para adaptadores futuros.
+- Modelos narrativos são carregados de forma idempotente na primeira consulta à
+  aba **Modelos**, inclusive em deploys serverless que não executam o CLI de migração.
 
 ## Instalação
 
