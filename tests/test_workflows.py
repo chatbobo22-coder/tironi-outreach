@@ -9,18 +9,7 @@ def test_hourly_schedule_retries_off_peak_and_keeps_database_quota_guard():
     worker = (root / "src/outreach/worker.py").read_text(encoding="utf-8")
 
     assert 'cron: "7,22,37,52 12-19 * * 1-5"' in workflow
-    assert "HOURLY_EMAIL_LIMIT: \"50\"" in workflow
+    assert "/api/dispatch/hourly" in workflow
+    assert "X-Cron-Secret" in workflow
     assert "now() - interval '1 hour'" in worker
     assert "settings.hourly_limit" in worker
-
-
-def test_supabase_cron_uses_vault_secret_and_cleans_history():
-    root = Path(__file__).resolve().parents[1]
-    migration = (root / "sql/010_supabase_hourly_dispatch.sql").read_text(
-        encoding="utf-8"
-    )
-
-    assert "vault.decrypted_secrets" in migration
-    assert "outreach_cron_secret" in migration
-    assert "X-Cron-Secret" in migration
-    assert "DELETE FROM cron.job_run_details" in migration

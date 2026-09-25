@@ -7,22 +7,6 @@ on:
     # mesmo que mais de uma tentativa seja iniciada.
     - cron: "7,22,37,52 12-19 * * 1-5"
   workflow_dispatch:
-    inputs:
-      limit:
-        description: Limite desta execução manual
-        required: true
-        type: string
-        default: "1"
-      dry_run:
-        description: Apenas preparar e visualizar, sem enviar
-        required: true
-        type: boolean
-        default: true
-      interval_seconds:
-        description: Intervalo entre envios reais
-        required: true
-        type: string
-        default: "30"
 
 permissions:
   contents: read
@@ -35,75 +19,24 @@ jobs:
   send:
     name: Enviar melhores leads da hora
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 5
     env:
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
-      RUN_LIMIT: ${{ github.event_name == 'schedule' && '50' || inputs.limit }}
-      SEND_INTERVAL_SECONDS: ${{ github.event_name == 'schedule' && '2' || inputs.interval_seconds }}
-      REQUIRE_MANUAL_APPROVAL: "false"
-      DAILY_EMAIL_LIMIT: "400"
-      HOURLY_EMAIL_LIMIT: "50"
-      PREPARED_QUEUE_TARGET: "400"
-      MAX_PER_DOMAIN_PER_DAY: "2"
-      MAX_FOLLOW_UPS: "1"
-      FOLLOW_UP_DELAY_DAYS: "7"
-      SEND_START_HOUR: "9"
-      SEND_END_HOUR: "17"
-      APP_TIMEZONE: America/Sao_Paulo
-      EMAIL_PROVIDER: sendpulse_smtp
-      SMTP_HOST: smtp-pulse.com
-      SMTP_PORT: "587"
-      SMTP_STARTTLS: "true"
-      SMTP_SSL: "false"
-      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-      OUTREACH_FROM_EMAIL: ${{ secrets.OUTREACH_FROM_EMAIL }}
-      OUTREACH_FROM_NAME: ${{ secrets.OUTREACH_FROM_NAME || 'Paulo | Tironi Tech' }}
-      OUTREACH_REPLY_TO: ${{ secrets.OUTREACH_REPLY_TO }}
-      UNSUBSCRIBE_SECRET: ${{ secrets.UNSUBSCRIBE_SECRET }}
-      PUBLIC_BASE_URL: ${{ vars.PUBLIC_BASE_URL || 'https://tironi-outreach.vercel.app' }}
+      DISPATCH_URL: ${{ vars.PUBLIC_BASE_URL || 'https://tironi-outreach.vercel.app' }}/api/dispatch/hourly
+      CRON_SECRET: ${{ secrets.CRON_SECRET || secrets.UNSUBSCRIBE_SECRET }}
 
     steps:
-      - name: Baixar o projeto
-        uses: actions/checkout@v4
-
-      - name: Configurar Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Instalar o projeto
-        run: python -m pip install .
-
       - name: Validar configuração
         run: |
-          python - <<'PY'
-          import os
+          test -n "$CRON_SECRET" || { echo "CRON_SECRET ou UNSUBSCRIBE_SECRET ausente"; exit 1; }
 
-          required = [
-              "DATABASE_URL",
-              "SMTP_USERNAME",
-              "SMTP_PASSWORD",
-              "OUTREACH_FROM_EMAIL",
-              "UNSUBSCRIBE_SECRET",
-          ]
-          missing = [name for name in required if not os.getenv(name)]
-          if missing:
-              raise RuntimeError("Secrets ausentes: " + ", ".join(missing))
-
-          print(f"Modo seguro sem envio: {os.environ['DRY_RUN']}")
-          print(f"Limite desta execução: {os.environ['RUN_LIMIT']}")
-          print(f"Intervalo entre envios: {os.environ['SEND_INTERVAL_SECONDS']} segundos")
-          PY
-
-      - name: Sincronizar, preparar e processar
+      - name: Disparar lote no backend
         run: |
-          set -o pipefail
-          outreach run-daily \
-            --limit "$RUN_LIMIT" \
-            --interval "$SEND_INTERVAL_SECONDS" | tee daily-result.json
+          curl --silent --show-error --fail-with-body \
+            --max-time 240 \
+            --request POST \
+            --header "X-Cron-Secret: $CRON_SECRET" \
+            --header "Content-Type: application/json" \
+            "$DISPATCH_URL" | tee hourly-result.json
 
       - name: Publicar resumo
         if: always()
@@ -113,7 +46,7 @@ jobs:
           import os
           from pathlib import Path
 
-          result_path = Path("daily-result.json")
+          result_path = Path("hourly-result.json")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write("## Janela horária Tironi Tech\n")
               if not result_path.exists():
@@ -121,12 +54,6 @@ jobs:
               else:
                   data = json.loads(result_path.read_text(encoding="utf-8"))
                   labels = {
-                      "dry_run": "Modo seguro",
-                      "synced": "Leads sincronizados",
-                      "prepared_initial": "Envios iniciais preparados",
-                      "prepared_followups": "Follow-ups preparados",
-                      "recovered_stale": "Envios incertos recuperados",
-                      "delivery_uncertain": "Entregas que exigem reconciliação",
                       "processed": "Processados",
                       "sent": "Aceitos pelo SMTP",
                       "failed": "Falhas",
