@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import Literal
 
 import psycopg
@@ -8,8 +9,19 @@ from pydantic import BaseModel, Field
 
 from .config import Settings
 from .db import Database
+from .providers.base import OutboundEmail
+from .providers.smtp import SmtpProvider
 from .security import valid_unsubscribe_token
-from .service import ensure_story_templates, prepare_campaign, sync_leads
+from .service import (
+    audience_count,
+    ensure_dispatch_schema,
+    ensure_story_templates,
+    normalize_email,
+    prepare_campaign,
+    render,
+    sync_leads,
+)
+from .worker import process_one_result
 
 app = FastAPI(title="Tironi Outreach", version="1.0.0")
 settings = Settings()
@@ -28,6 +40,13 @@ class CampaignIn(BaseModel):
     body_html_template: str | None = Field(default=None, max_length=100000)
     template_id: int | None = None
     daily_limit: int = Field(default=30, ge=1, le=1000)
+    audience_mode: Literal["all", "quality", "score"] = "all"
+    audience_qualities: list[Literal["A", "B"]] = Field(
+        default_factory=lambda: ["A", "B"]
+    )
+    min_score: int | None = Field(default=None, ge=0, le=100)
+    max_score: int | None = Field(default=None, ge=0, le=100)
+    scheduled_at: datetime | None = None
 
 
 class TemplateIn(BaseModel):
@@ -40,6 +59,21 @@ class TemplateIn(BaseModel):
 
 class DeliveryResolutionIn(BaseModel):
     delivered: bool
+
+
+class AudienceEstimateIn(BaseModel):
+    audience_mode: Literal["all", "quality", "score"] = "all"
+    audience_qualities: list[Literal["A", "B"]] = Field(
+        default_factory=lambda: ["A", "B"]
+    )
+    min_score: int | None = Field(default=None, ge=0, le=100)
+    max_score: int | None = Field(default=None, ge=0, le=100)
+
+
+class TestEmailIn(BaseModel):
+    template_id: int
+    email: str = Field(min_length=5, max_length=320)
+    company_name: str = Field(default="Empresa de teste", min_length=2, max_length=160)
 
 
 CrmServiceType = Literal[
@@ -108,11 +142,17 @@ def api_sync_leads():
 
 @app.post("/api/campaigns", dependencies=[Depends(auth)])
 def create_campaign(data: CampaignIn):
+    if data.min_score is not None and data.max_score is not None:
+        if data.min_score > data.max_score:
+            raise HTTPException(422, "Score mínimo não pode superar o máximo")
     with db.connect() as conn:
+        ensure_dispatch_schema(conn)
         row = conn.execute(
             "INSERT INTO outreach.campaigns "
-            "(name,subject_template,body_template,body_html_template,template_id,daily_limit,requires_approval) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            "(name,subject_template,body_template,body_html_template,template_id,"
+            "daily_limit,requires_approval,audience_mode,audience_qualities,min_score,"
+            "max_score,scheduled_start_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
             (
                 data.name,
                 data.subject_template,
@@ -121,10 +161,68 @@ def create_campaign(data: CampaignIn):
                 data.template_id,
                 data.daily_limit,
                 settings.require_approval,
+                data.audience_mode,
+                data.audience_qualities,
+                data.min_score,
+                data.max_score,
+                data.scheduled_at,
             ),
         ).fetchone()
+        audience = audience_count(conn, row)
         conn.commit()
-    return {"id": row["id"]}
+    return {"id": row["id"], "audience": audience}
+
+
+@app.post("/api/audience/estimate", dependencies=[Depends(auth)])
+def estimate_audience(data: AudienceEstimateIn):
+    if data.min_score is not None and data.max_score is not None:
+        if data.min_score > data.max_score:
+            raise HTTPException(422, "Score mínimo não pode superar o máximo")
+    with db.connect() as conn:
+        ensure_dispatch_schema(conn)
+        return {
+            "audience": audience_count(
+                conn,
+                {
+                    "audience_mode": data.audience_mode,
+                    "audience_qualities": data.audience_qualities,
+                    "min_score": data.min_score,
+                    "max_score": data.max_score,
+                },
+            )
+        }
+
+
+@app.post("/api/test-email", dependencies=[Depends(auth)])
+def send_test_email(data: TestEmailIn):
+    destination = normalize_email(data.email)
+    if not destination:
+        raise HTTPException(422, "Informe um e-mail válido")
+    try:
+        settings.validate_smtp()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    with db.connect() as conn:
+        template = conn.execute(
+            "SELECT * FROM outreach.templates WHERE id=%s AND status='active'",
+            (data.template_id,),
+        ).fetchone()
+    if not template:
+        raise HTTPException(404, "Modelo não encontrado")
+    lead = {"trade_name": data.company_name, "company_name": data.company_name}
+    result = SmtpProvider(settings).send(
+        OutboundEmail(
+            message_id=0,
+            to=destination,
+            subject=f"[TESTE] {render(template['subject'], lead)}",
+            text=render(template["text_body"], lead),
+            html=render(template["html_body"], lead),
+            unsubscribe_url="https://www.tironitech.com/",
+        )
+    )
+    if not result.accepted:
+        raise HTTPException(502, result.error or "Provedor recusou o teste")
+    return {"sent": True, "destination": destination}
 
 
 @app.get("/api/templates", dependencies=[Depends(auth)])
@@ -221,6 +319,84 @@ def api_prepare(campaign_id: int):
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
     return {"prepared": count}
+
+
+@app.post("/api/campaigns/{campaign_id}/launch", dependencies=[Depends(auth)])
+def launch_campaign(campaign_id: int):
+    with db.connect() as conn:
+        ensure_dispatch_schema(conn)
+        campaign = conn.execute(
+            "SELECT * FROM outreach.campaigns WHERE id=%s", (campaign_id,)
+        ).fetchone()
+        if not campaign:
+            raise HTTPException(404, "Campanha não encontrada")
+        prepared = prepare_campaign(conn, campaign_id, settings, commit=False)
+        approved = conn.execute(
+            """
+            UPDATE outreach.messages
+            SET status='queued',approved_at=now(),updated_at=now()
+            WHERE campaign_id=%s AND status='pending_approval'
+            """,
+            (campaign_id,),
+        ).rowcount
+        conn.execute(
+            """
+            UPDATE outreach.campaigns
+            SET status='active',launched_at=coalesce(launched_at,now()),updated_at=now()
+            WHERE id=%s
+            """,
+            (campaign_id,),
+        )
+        queued = conn.execute(
+            """
+            SELECT count(*) AS total FROM outreach.messages
+            WHERE campaign_id=%s AND status IN ('approved','queued')
+            """,
+            (campaign_id,),
+        ).fetchone()["total"]
+        conn.commit()
+    return {"prepared": prepared, "approved": approved, "queued": queued}
+
+
+@app.post("/api/campaigns/{campaign_id}/pause", dependencies=[Depends(auth)])
+def pause_campaign(campaign_id: int):
+    with db.connect() as conn:
+        result = conn.execute(
+            "UPDATE outreach.campaigns SET status='paused',updated_at=now() "
+            "WHERE id=%s AND status='active'",
+            (campaign_id,),
+        )
+        conn.commit()
+    if not result.rowcount:
+        raise HTTPException(409, "Campanha não está ativa")
+    return {"paused": True}
+
+
+@app.post("/api/campaigns/{campaign_id}/resume", dependencies=[Depends(auth)])
+def resume_campaign(campaign_id: int):
+    with db.connect() as conn:
+        result = conn.execute(
+            "UPDATE outreach.campaigns SET status='active',updated_at=now() "
+            "WHERE id=%s AND status='paused'",
+            (campaign_id,),
+        )
+        conn.commit()
+    if not result.rowcount:
+        raise HTTPException(409, "Campanha não está pausada")
+    return {"resumed": True}
+
+
+@app.post("/api/campaigns/{campaign_id}/send-next", dependencies=[Depends(auth)])
+def send_next_campaign_message(campaign_id: int):
+    if settings.dry_run:
+        raise HTTPException(409, "Envio real bloqueado enquanto DRY_RUN estiver ativo")
+    try:
+        settings.validate_smtp()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    with db.connect() as conn:
+        status = process_one_result(conn, settings, campaign_id)
+    return {"processed": status is not None, "status": status}
 
 
 @app.post("/api/campaigns/{campaign_id}/approve", dependencies=[Depends(auth)])
@@ -588,6 +764,7 @@ def crm_lead_detail(lead_id: int):
 @app.get("/api/queue", dependencies=[Depends(auth)])
 def queue_status():
     with db.connect() as conn:
+        ensure_dispatch_schema(conn)
         metrics = conn.execute(
             """
             SELECT
@@ -611,17 +788,54 @@ def queue_status():
               m.id,
               coalesce(nullif(l.trade_name, ''), l.company_name) AS company,
               c.name AS campaign,
+              c.id AS campaign_id,
+              c.status AS campaign_status,
+              t.name AS template_name,
               m.destination,
               m.subject,
               m.scheduled_at,
+              m.sent_at,
               m.status,
-              m.updated_at
+              m.updated_at,
+              m.provider,
+              m.last_error,
+              coalesce(l.lead_score,0) AS score,
+              coalesce(l.source_payload->>'lead_quality','B') AS lead_quality
             FROM outreach.messages m
             JOIN outreach.leads l ON l.id=m.lead_id
             JOIN outreach.campaigns c ON c.id=m.campaign_id
-            WHERE m.status IN ('pending_approval','approved','queued','sending')
-            ORDER BY m.scheduled_at NULLS LAST, m.id
-            LIMIT 100
+            LEFT JOIN outreach.templates t ON t.id=c.template_id
+            WHERE m.status <> 'canceled'
+            ORDER BY
+              CASE WHEN m.status IN ('sending','approved','queued','pending_approval')
+                THEN 0 ELSE 1 END,
+              m.updated_at DESC,
+              m.id DESC
+            LIMIT 200
+            """
+        ).fetchall()
+        campaigns = conn.execute(
+            """
+            SELECT c.id,c.name,c.status,c.audience_mode,c.audience_qualities,
+              c.min_score,c.max_score,c.daily_limit,c.scheduled_start_at,c.launched_at,
+              t.name AS template_name,
+              count(m.id) AS total,
+              count(*) FILTER (
+                WHERE m.status IN ('pending_approval','approved','queued')
+              ) AS queued,
+              count(*) FILTER (WHERE m.status='sending') AS sending,
+              count(*) FILTER (
+                WHERE m.status IN ('sent','delivered','replied','unsubscribed')
+              ) AS sent,
+              count(*) FILTER (WHERE m.status='delivered') AS delivered,
+              count(*) FILTER (WHERE m.status IN ('failed','bounced')) AS failed,
+              count(*) FILTER (WHERE m.status='replied') AS replied
+            FROM outreach.campaigns c
+            LEFT JOIN outreach.templates t ON t.id=c.template_id
+            LEFT JOIN outreach.messages m ON m.campaign_id=c.id
+            GROUP BY c.id,t.name
+            ORDER BY c.updated_at DESC,c.id DESC
+            LIMIT 30
             """
         ).fetchall()
         recent = conn.execute(
@@ -641,7 +855,7 @@ def queue_status():
         }
         for row in recent
     ]
-    return {"metrics": metrics, "items": items, "logs": logs}
+    return {"metrics": metrics, "campaigns": campaigns, "items": items, "logs": logs}
 
 
 @app.get("/api/settings", dependencies=[Depends(auth)])

@@ -15,6 +15,7 @@ STORY_TEMPLATE_NAMES = (
     "História 06 - A aposentadoria do copiar e colar",
 )
 STORY_TEMPLATE_SEED_LOCK = 843_176_620_007
+DISPATCH_SCHEMA_LOCK = 843_176_620_008
 
 
 def ensure_story_templates(conn) -> int:
@@ -47,6 +48,85 @@ def ensure_story_templates(conn) -> int:
     )
     conn.execute(migration.read_text(encoding="utf-8"))
     return len(STORY_TEMPLATE_NAMES) - existing
+
+
+def ensure_dispatch_schema(conn) -> bool:
+    available = conn.execute(
+        """
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema='outreach' AND table_name='campaigns'
+            AND column_name='audience_mode'
+        ) AS available
+        """
+    ).fetchone()["available"]
+    if available:
+        return False
+
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (DISPATCH_SCHEMA_LOCK,))
+    available = conn.execute(
+        """
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema='outreach' AND table_name='campaigns'
+            AND column_name='audience_mode'
+        ) AS available
+        """
+    ).fetchone()["available"]
+    if available:
+        return False
+
+    migration = (
+        Path(__file__).resolve().parents[2] / "sql" / "008_campaign_audiences.sql"
+    )
+    conn.execute(migration.read_text(encoding="utf-8"))
+    return True
+
+
+def audience_filter(campaign: dict) -> tuple[str, tuple]:
+    mode = campaign.get("audience_mode") or "all"
+    if mode == "quality":
+        qualities = tuple(campaign.get("audience_qualities") or ("A", "B"))
+        placeholders = ",".join(["%s"] * len(qualities))
+        return (
+            f"AND coalesce(l.source_payload->>'lead_quality','B') IN ({placeholders})",
+            qualities,
+        )
+    if mode == "score":
+        return (
+            "AND coalesce(l.lead_score,0) BETWEEN %s AND %s",
+            (
+                int(campaign.get("min_score") or 0),
+                int(campaign.get("max_score") or 100),
+            ),
+        )
+    return "", ()
+
+
+def audience_count(conn, campaign: dict) -> dict:
+    clause, params = audience_filter(campaign)
+    return conn.execute(
+        f"""
+        SELECT count(*) AS total,
+          count(*) FILTER (
+            WHERE coalesce(l.source_payload->>'lead_quality','B')='A'
+          ) AS quality_a,
+          count(*) FILTER (
+            WHERE coalesce(l.source_payload->>'lead_quality','B')='B'
+          ) AS quality_b,
+          coalesce(min(l.lead_score),0) AS min_score,
+          coalesce(max(l.lead_score),0) AS max_score
+        FROM outreach.leads l
+        WHERE l.status='ready' AND l.email IS NOT NULL
+          AND l.contact_role NOT IN ('finance','accounting')
+          AND NOT EXISTS (
+            SELECT 1 FROM outreach.suppressions s
+            WHERE s.channel='email' AND lower(s.destination)=lower(l.email)
+          )
+          {clause}
+        """,
+        params,
+    ).fetchone()
 
 
 def normalize_email(value: str | None) -> str | None:
@@ -246,43 +326,46 @@ def prepare_campaign(
     ).fetchone()
     if not campaign or campaign["channel"] != "email":
         raise ValueError("Campanha de e-mail não encontrada")
-    rows = conn.execute(
-        """
-        SELECT l.* FROM outreach.leads l
-        WHERE l.status = 'ready' AND l.email IS NOT NULL
+    clause, audience_params = audience_filter(campaign)
+    initial_status = "pending_approval" if settings.require_approval else "queued"
+    company_sql = "coalesce(nullif(l.trade_name,''),l.company_name,'sua empresa')"
+    reason_sql = "coalesce(l.company_name,'')"
+    cnpj_sql = "coalesce(l.cnpj::text,'')"
+    render_sql = (
+        f"replace(replace(replace(%s,'{{empresa}}',{company_sql}),"
+        f"'{{razao_social}}',{reason_sql}),'{{cnpj}}',{cnpj_sql})"
+    )
+    result = conn.execute(
+        f"""
+        INSERT INTO outreach.messages
+          (campaign_id,lead_id,channel,destination,destination_domain,subject,
+           body_text,body_html,status,scheduled_at,sequence_step)
+        SELECT %s,l.id,'email',l.email,l.email_domain,
+          {render_sql},
+          {render_sql},
+          {render_sql},
+          %s,coalesce(%s,now()),0
+        FROM outreach.leads l
+        WHERE l.status='ready' AND l.email IS NOT NULL
           AND l.contact_role NOT IN ('finance','accounting')
           AND NOT EXISTS (
             SELECT 1 FROM outreach.suppressions s
             WHERE s.channel='email' AND lower(s.destination)=lower(l.email)
           )
-        ORDER BY l.lead_score DESC NULLS LAST, l.id
-        """
-    ).fetchall()
-    initial_status = "pending_approval" if settings.require_approval else "queued"
-    count = 0
-    for lead in rows:
-        result = conn.execute(
-            """
-            INSERT INTO outreach.messages
-              (campaign_id,lead_id,channel,destination,destination_domain,subject,
-               body_text,body_html,status,scheduled_at,sequence_step)
-            VALUES (%s,%s,'email',%s,%s,%s,%s,%s,%s,now(),0)
-            ON CONFLICT (campaign_id,lead_id,channel,sequence_step) DO NOTHING
-            """,
-            (
-                campaign_id,
-                lead["id"],
-                lead["email"],
-                lead["email_domain"],
-                render(campaign["subject_template"] or "Contato Tironi Tech", lead),
-                render(campaign["body_template"], lead),
-                render(campaign["body_html_template"], lead)
-                if campaign.get("body_html_template")
-                else None,
-                initial_status,
-            ),
-        )
-        count += result.rowcount
+          {clause}
+        ON CONFLICT (campaign_id,lead_id,channel,sequence_step) DO NOTHING
+        """,
+        (
+            campaign_id,
+            campaign["subject_template"] or "Contato Tironi Tech",
+            campaign["body_template"],
+            campaign.get("body_html_template"),
+            initial_status,
+            campaign.get("scheduled_start_at"),
+            *audience_params,
+        ),
+    )
+    count = result.rowcount
     if commit:
         conn.commit()
     return count

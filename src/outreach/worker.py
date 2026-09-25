@@ -33,7 +33,9 @@ def process_one_result(
             """
             SELECT m.* FROM outreach.messages m
             JOIN outreach.leads l ON l.id=m.lead_id
+            JOIN outreach.campaigns c ON c.id=m.campaign_id
             WHERE m.status IN ('approved','queued')
+              AND c.status='active'
               AND (m.scheduled_at IS NULL OR m.scheduled_at <= now())
               AND (
                 (m.sequence_step=0 AND l.status='ready')
@@ -47,6 +49,11 @@ def process_one_result(
                    WHERE x.sent_at >= %s
                       OR (x.status IN ('sending','delivery_uncertain')
                           AND x.updated_at >= %s)) < %s
+              AND (SELECT count(*) FROM outreach.messages x
+                   WHERE x.campaign_id=m.campaign_id
+                     AND (x.sent_at >= %s
+                          OR (x.status IN ('sending','delivery_uncertain')
+                              AND x.updated_at >= %s))) < c.daily_limit
               AND (SELECT count(*) FROM outreach.messages x
                    WHERE x.sent_at >= now() - interval '1 hour'
                       OR (x.status IN ('sending','delivery_uncertain')
@@ -64,6 +71,8 @@ def process_one_result(
                 day_start,
                 day_start,
                 settings.daily_limit,
+                day_start,
+                day_start,
                 settings.hourly_limit,
                 day_start,
                 day_start,
