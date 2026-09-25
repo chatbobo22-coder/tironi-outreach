@@ -59,6 +59,8 @@ def test_sync_leads_uses_only_current_qualified_ab_source():
     assert "qualification_status = 'qualified'" in conn.source_query
     assert "lead_quality IN ('A', 'B')" in conn.source_query
     assert "whatsapp_url" in conn.source_query
+    assert "jsonb_strip_nulls(jsonb_build_object" in conn.source_query
+    assert "to_jsonb(p)" not in conn.source_query
 
 
 def test_render():

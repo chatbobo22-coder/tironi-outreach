@@ -59,7 +59,15 @@ def sync_leads(conn, *, commit: bool = True) -> int:
               IN ('financeiro','fiscal','nfe','contabilidade') THEN 'finance'
             ELSE 'general'
           END,
-          p.lead_score,p.confidence_score,to_jsonb(p),'cnpj_etl','ready',now()
+          p.lead_score,p.confidence_score,
+          jsonb_strip_nulls(jsonb_build_object(
+            'lead_quality',p.lead_quality,
+            'qualification_reasons',p.qualification_reasons,
+            'qualification_version',p.qualification_version,
+            'contact_channel',p.contact_channel,
+            'marketing_ready',true,
+            'marketing_ready_at',coalesce(p.qualified_at,now())
+          )),'cnpj_etl','ready',now()
         FROM cnpj.prospectos_qualificados p
         WHERE p.qualification_status = 'qualified' AND p.lead_quality IN ('A', 'B')
           AND p.email IS NOT NULL
